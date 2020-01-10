@@ -1,0 +1,13 @@
+diff -up tboot-1.7.0/README.orig tboot-1.7.0/README
+--- tboot-1.7.0/README.orig	2012-01-15 10:21:20.000000000 -0500
++++ tboot-1.7.0/README	2012-10-16 13:50:01.655930584 -0400
+@@ -9,9 +9,6 @@ and verified launch of an OS kernel/VMM.
+ This version of tboot supports Intel (both retail and Software Development
+ Platforms (SDPs)) and OEM systems that are Intel TXT-capable.
+ 
+-This version of tboot only supports both the Xen virtual machine monitor
+-(versions >= 3.4) and Linux kernel versions >= 2.6.33.
+-
+ The mercurial source code repository for this project is located at:
+ http://www.bughost.org/repos.hg/tboot.hg.
+ 
