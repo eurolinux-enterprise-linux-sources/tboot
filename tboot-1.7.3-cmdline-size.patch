@@ -1,0 +1,51 @@
+Fix kernel cmdline no null terminal issue.
+
+Meanwhile explicitly enlarge the cmdline size to 1023 bytes
+
+Signed-off-by: Gang Wei <gang.wei@intel.com>
+
+--- ./tboot/common/linux.c.orig	2013-06-27 19:23:37.543136731 -0400
++++ ./tboot/common/linux.c	2013-06-27 19:23:06.726138016 -0400
+@@ -103,7 +103,7 @@ bool expand_linux_image(const void *linu
+     /* recommended layout
+         0x0000 - 0x7FFF     Real mode kernel
+         0x8000 - 0x8FFF     Stack and heap
+-        0x9000 - 0x90FF     Kernel command line
++        0x9000 - 0x93FF     Kernel command line
+         for details, see linux_defns.h
+     */
+ 
+@@ -124,12 +124,12 @@ bool expand_linux_image(const void *linu
+     /* compare to the magic number */
+     if ( hdr->header != HDRS_MAGIC ) {
+         /* old kernel */
+-        printk(TBOOT_ERR"Error: Old kernel (< 2.6.20) is not supported by tboot.\n");
++        printk(TBOOT_ERR"Error: Old kernel (< 2.6.22) is not supported by tboot.\n");
+         return false;
+     }
+ 
+-    if ( hdr->version < 0x0205 ) {
+-        printk(TBOOT_ERR"Error: Old kernel (<2.6.20) is not supported by tboot.\n");
++    if ( hdr->version < 0x0206 ) {
++        printk(TBOOT_ERR"Error: Old kernel (<2.6.22) is not supported by tboot.\n");
+         return false;
+     }
+ 
+@@ -260,6 +260,7 @@ bool expand_linux_image(const void *linu
+ 
+     /* set cmd_line_ptr */
+     hdr->cmd_line_ptr = real_mode_base + KERNEL_CMDLINE_OFFSET;
++    hdr->cmdline_size = REAL_END_OFFSET - KERNEL_CMDLINE_OFFSET - 1;
+ 
+     /* load protected-mode part */
+     memmove((void *)protected_mode_base, linux_image + real_mode_size,
+@@ -276,7 +277,8 @@ bool expand_linux_image(const void *linu
+ 
+     /* copy cmdline */
+     const char *kernel_cmdline = skip_filename((const char *)g_mbi->cmdline);
+-    memcpy((void *)hdr->cmd_line_ptr, kernel_cmdline, strlen(kernel_cmdline));
++    strncpy((void *)hdr->cmd_line_ptr, kernel_cmdline, hdr->cmdline_size);
++    ((char *)hdr->cmd_line_ptr)[hdr->cmdline_size] = '\0';
+ 
+     /* need to put boot_params in real mode area so it gets mapped */
+     boot_params = (boot_params_t *)(real_mode_base + real_mode_size);

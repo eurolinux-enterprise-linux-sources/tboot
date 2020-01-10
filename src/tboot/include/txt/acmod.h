@@ -108,6 +108,8 @@ typedef struct __packed {
 /* chipset_acm_type field values */
 #define ACM_CHIPSET_TYPE_BIOS         0x00
 #define ACM_CHIPSET_TYPE_SINIT        0x01
+#define ACM_CHIPSET_TYPE_BIOS_REVOC   0x08
+#define ACM_CHIPSET_TYPE_SINIT_REVOC  0x09
 
 typedef struct __packed {
     uint32_t  flags;
@@ -136,6 +138,9 @@ typedef struct __packed {
 } acm_processor_id_list_t;
 
 extern void print_txt_caps(const char *prefix, txt_caps_t caps);
+extern bool is_racm_acmod(const void *acmod_base, uint32_t acmod_size, bool quiet);
+extern acm_hdr_t *copy_racm(const acm_hdr_t *racm);
+extern bool verify_racm(const acm_hdr_t *acm_hdr);
 extern bool is_sinit_acmod(const void *acmod_base, uint32_t acmod_size, bool quiet);
 extern bool does_acmod_match_platform(const acm_hdr_t* hdr);
 extern acm_hdr_t *copy_sinit(const acm_hdr_t *sinit);

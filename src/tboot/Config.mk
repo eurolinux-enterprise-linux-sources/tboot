@@ -32,7 +32,7 @@ CFLAGS		+= $(call cc-option,$(CC),-fno-stack-protector,)
 CFLAGS		+= $(call cc-option,$(CC),-fno-stack-protector-all,)
 
 # changeset variable for banner
-CFLAGS		+= -DTBOOT_CHANGESET=\""$(shell ((hg parents --template "{isodate|isodate} {rev}:{node|short}" >/dev/null && hg parents --template "{isodate|isodate} {rev}:{node|short}") || echo "2012-01-15 23:30 +0800 1.7.0") 2>/dev/null)"\"
+CFLAGS		+= -DTBOOT_CHANGESET=\""$(shell ((hg parents --template "{isodate|isodate} {rev}:{node|short}" >/dev/null && hg parents --template "{isodate|isodate} {rev}:{node|short}") || echo "2013-07-05 12:00 +0800 1.7.4"") 2>/dev/null)"\"
 
 
 AFLAGS		+= -D__ASSEMBLY__
@@ -43,4 +43,4 @@ AFLAGS		+= $(patsubst -std=gnu%,,$(CFLAGS))
 
 
 # LDFLAGS are only passed directly to $(LD)
-LDFLAGS		+= -melf_i386
+LDFLAGS		= -melf_i386

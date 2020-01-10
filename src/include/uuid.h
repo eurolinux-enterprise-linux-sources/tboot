@@ -53,9 +53,13 @@ static inline bool are_uuids_equal(const uuid_t *uuid1, const uuid_t *uuid2)
 #define PRINT   printk
 #endif
 
+#ifndef TBOOT_DETA
+#define TBOOT_DETA  "<4>"
+#endif
+
 static inline void print_uuid(const uuid_t *uuid)
 {
-    PRINT("{0x%08x, 0x%04x, 0x%04x, 0x%04x,\n"
+    PRINT(TBOOT_DETA"{0x%08x, 0x%04x, 0x%04x, 0x%04x,\n"
            "\t\t{0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x}}",
            uuid->data1, (uint32_t)uuid->data2, (uint32_t)uuid->data3,
            (uint32_t)uuid->data4, (uint32_t)uuid->data5[0],

@@ -49,6 +49,9 @@ extern void get_tboot_fmt(void);
 extern void get_tboot_vga_delay(void);
 extern bool get_tboot_mwait(void);
 extern bool get_tboot_prefer_da(void);
+extern void get_tboot_min_ram(void);
+extern bool get_tboot_call_racm(void);
+extern bool get_tboot_call_racm_check(void);
 
 /* for parse cmdline of linux kernel, say vga and mem */
 extern void linux_parse_cmdline(const char *cmdline);

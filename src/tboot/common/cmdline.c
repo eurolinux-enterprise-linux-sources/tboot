@@ -1,7 +1,7 @@
 /*
  * cmdline.c: command line parsing fns
  *
- * Copyright (c) 2006-2010, Intel Corporation
+ * Copyright (c) 2006-2012, Intel Corporation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -73,6 +73,8 @@ static const cmdline_option_t g_tboot_cmdline_options[] = {
     { "vga_delay",  "0" },           /* # secs */
     { "ap_wake_mwait", "false" },    /* true|false */
     { "pcr_map", "legacy" },         /* legacy|da */
+    { "min_ram", "0" },              /* size in bytes | 0 for no min */
+    { "call_racm", "false" },        /* true|false|check */
     { NULL, NULL }
 };
 static char g_tboot_param_values[ARRAY_SIZE(g_tboot_cmdline_options)][MAX_VALUE_LEN];
@@ -95,6 +97,7 @@ static const tb_loglvl_map_t g_loglvl_map[] = {
     { "err",   TBOOT_LOG_LEVEL_ERR   },
     { "warn",  TBOOT_LOG_LEVEL_WARN  },
     { "info",  TBOOT_LOG_LEVEL_INFO  },
+    { "detail",TBOOT_LOG_LEVEL_DETA  },
     { "all",   TBOOT_LOG_LEVEL_ALL   },
 };
 
@@ -106,7 +109,7 @@ static const char* get_option_val(const cmdline_option_t *options,
         if ( strcmp(options[i].name, opt_name) == 0 )
             return vals[i];
     }
-    printk("requested unknown option: %s\n", opt_name);
+    printk(TBOOT_ERR"requested unknown option: %s\n", opt_name);
     return NULL;
 }
 
@@ -442,9 +445,16 @@ bool get_tboot_prefer_da(void)
     return false;
 }
 
-/*
- * linux kernel command line parsing
- */
+extern uint32_t g_min_ram;
+void get_tboot_min_ram(void)
+{
+    const char *min_ram = get_option_val(g_tboot_cmdline_options,
+                                         g_tboot_param_values, "min_ram");
+    if ( min_ram == NULL )
+        return;
+
+    g_min_ram = strtoul(min_ram, NULL, 0);
+}
 
 bool get_tboot_mwait(void)
 {
@@ -454,6 +464,28 @@ bool get_tboot_mwait(void)
         return false;
     return true;
 }
+
+bool get_tboot_call_racm(void)
+{
+    const char *call_racm = get_option_val(g_tboot_cmdline_options,
+                                       g_tboot_param_values, "call_racm");
+    if ( call_racm == NULL || strcmp(call_racm, "true") != 0 )
+        return false;
+    return true;
+}
+
+bool get_tboot_call_racm_check(void)
+{
+    const char *call_racm = get_option_val(g_tboot_cmdline_options,
+                                       g_tboot_param_values, "call_racm");
+    if ( call_racm == NULL || strcmp(call_racm, "check") != 0 )
+        return false;
+    return true;
+}
+
+/*
+ * linux kernel command line parsing
+ */
 
 bool get_linux_vga(int *vid_mode)
 {
