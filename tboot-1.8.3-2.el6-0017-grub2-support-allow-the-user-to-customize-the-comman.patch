@@ -1,0 +1,143 @@
+From c849a0b78aa87036707aabd63885f51c9e7ae697 Mon Sep 17 00:00:00 2001
+From: Martin Wilck <martin.wilck@ts.fujitsu.com>
+Date: Wed, 24 Feb 2016 12:41:47 +0100
+Subject: grub2 support: allow the user to customize the command line
+
+Provide configuration variables to be customize the command line.
+Configuration is read from /etc/default/grub-tboot.
+
+Command line for tboot itself: GRUB_CMDLINE_TBOOT
+Linux kernel parameters to append for tboot: GRUB_CMDLINE_LINUX_TBOOT
+Xen parameters to append for tboot: GRUB_CMDLINE_XEN_TBOOT
+Linux kernel parameters to append for tboot + Xen: GRUB_CMDLINE_LINUX_XEN_TBOOT
+---
+ tboot/20_linux_tboot     |   45 ++++++++++++++++++++++++++++++++++++---------
+ tboot/20_linux_xen_tboot |   25 +++++++++++++++++++++++--
+ 2 files changed, 59 insertions(+), 11 deletions(-)
+
+diff --git a/tboot/20_linux_tboot b/tboot/20_linux_tboot
+index 6f8cfee..0039843 100644
+--- a/tboot/20_linux_tboot
++++ b/tboot/20_linux_tboot
+@@ -21,12 +21,44 @@ prefix=/usr
+ exec_prefix=${prefix}
+ bindir=${exec_prefix}/bin
+ libdir=${exec_prefix}/lib
++sysconfdir=/etc
+ if test -e /usr/share/grub/grub-mkconfig_lib; then
+   . /usr/share/grub/grub-mkconfig_lib
+ elif test -e ${libdir}/grub/grub-mkconfig_lib; then
+   . ${libdir}/grub/grub-mkconfig_lib
+ fi
+ 
++if test -e ${sysconfdir}/default/grub-tboot; then
++  .  ${sysconfdir}/default/grub-tboot
++fi
++
++# Set the following variables in /etc/default/grub-tboot to customize command lines
++# (empty values are treated as if the variables were unset).
++[ -z "${GRUB_CMDLINE_TBOOT}" ] && unset GRUB_CMDLINE_TBOOT
++[ -z "${GRUB_CMDLINE_LINUX_TBOOT}" ] && unset GRUB_CMDLINE_LINUX_TBOOT
++# Command line for tboot itself
++: ${GRUB_CMDLINE_TBOOT='logging=serial,memory,vga'}
++# Linux kernel parameters to append for tboot
++: ${GRUB_CMDLINE_LINUX_TBOOT='intel_iommu=on'}
++
++# VGA logging is not supported in UEFI environment
++if [ -d /sys/firmware/efi ]; then
++  _cmdline=
++  for _arg in ${GRUB_CMDLINE_TBOOT}; do
++    case ${_arg} in
++      logging=*vga*)
++	echo "UEFI environment: deactivating VGA logging for tboot" >&2
++	_arg=`echo "${_arg}" | sed -e 's/=vga,/=/' -e s'/,\{0,1\}vga//' -e s'/=$/=none/'`;;
++    esac
++    if [ -z "${_cmdline}" ]; then
++      _cmdline=${_arg}
++    else
++      _cmdline="${_cmdline} ${_arg}"
++    fi
++  done
++  GRUB_CMDLINE_TBOOT=${_cmdline}
++fi
++
+ export TEXTDOMAIN=grub
+ export TEXTDOMAINDIR=${prefix}/share/locale
+ 
+@@ -173,18 +205,13 @@ while [ "x${tboot_list}" != "x" ] && [ "x$linux_list" != "x" ] ; do
+ 	    linux_root_device_thisversion=${GRUB_DEVICE}
+ 	fi
+ 	
+-	if [ -d /sys/firmware/efi ] ; then
+-	    # there's no vga console available under EFI
+-	    tboot_log="logging=serial,memory"
+-	else
+-	    tboot_log="logging=serial,vga,memory"
+-	fi
+-
+ 	linux_entry "${OS}" "${version}" "${tboot_version}" false \
+-	    "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}" ${tboot_log} "intel_iommu=on"
++		    "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}" "${GRUB_CMDLINE_TBOOT}" \
++		    "${GRUB_CMDLINE_LINUX_TBOOT}"
+ 	if [ "x${GRUB_DISABLE_RECOVERY}" != "xtrue" ]; then
+ 	    linux_entry "${OS}" "${version}" "${tboot_version}" true \
+-		"single ${GRUB_CMDLINE_LINUX}" ${tboot_log} "intel_iommu=on"
++			"single ${GRUB_CMDLINE_LINUX}" "${GRUB_CMDLINE_TBOOT}" \
++			"${GRUB_CMDLINE_LINUX_TBOOT}"
+ 	fi
+ 
+ 	list=`echo $list | tr ' ' '\n' | grep -vx $linux | tr '\n' ' '`
+diff --git a/tboot/20_linux_xen_tboot b/tboot/20_linux_xen_tboot
+index 94d2b8e..56e0153 100644
+--- a/tboot/20_linux_xen_tboot
++++ b/tboot/20_linux_xen_tboot
+@@ -21,12 +21,29 @@ prefix=/usr
+ exec_prefix=${prefix}
+ bindir=${exec_prefix}/bin
+ libdir=${exec_prefix}/lib
++sysconfdir=/etc
+ if test -e /usr/share/grub/grub-mkconfig_lib; then
+   . /usr/share/grub/grub-mkconfig_lib
+ elif test -e ${libdir}/grub/grub-mkconfig_lib; then
+   . ${libdir}/grub/grub-mkconfig_lib
+ fi
+ 
++if test -e ${sysconfdir}/default/grub-tboot; then
++  .  ${sysconfdir}/default/grub-tboot
++fi
++
++# Set the following variables in /etc/default/grub-tboot to customize command lines
++# (empty values are treated as if the variables were unset).
++[ -z "${GRUB_CMDLINE_TBOOT}" ] && unset GRUB_CMDLINE_TBOOT
++[ -z "${GRUB_CMDLINE_XEN_TBOOT}" ] && unset GRUB_CMDLINE_XEN_TBOOT
++[ -z "${GRUB_CMDLINE_LINUX_XEN_TBOOT}" ] && unset GRUB_CMDLINE_LINUX_XEN_TBOOT
++# Command line for tboot itself
++: ${GRUB_CMDLINE_TBOOT='logging=serial,memory,vga'}
++# Xen parameters to append for tboot
++: ${GRUB_CMDLINE_XEN_TBOOT=''}
++# Linux kernel parameters to append for tboot + Xen
++: ${GRUB_CMDLINE_LINUX_XEN_TBOOT=''}
++
+ export TEXTDOMAIN=grub
+ export TEXTDOMAINDIR=${prefix}/share/locale
+ 
+@@ -203,10 +220,14 @@ while [ "x${xen_list}" != "x" ] ; do
+             fi
+ 
+             linux_entry "${OS}" "${version}" "${xen_version}" false \
+-	        "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}" "${GRUB_CMDLINE_XEN} ${GRUB_CMDLINE_XEN_DEFAULT}" "${tboot_version}" "logging=serial,vga,memory" "iommu=force"
++			"${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT} ${GRUB_CMDLINE_LINUX_XEN_TBOOT}" \
++			"${GRUB_CMDLINE_XEN} ${GRUB_CMDLINE_XEN_DEFAULT} ${GRUB_CMDLINE_XEN_TBOOT}" \
++			"${tboot_version}" "${GRUB_CMDLINE_TBOOT}" "iommu=force"
+             if [ "x${GRUB_DISABLE_RECOVERY}" != "xtrue" ]; then
+                 linux_entry "${OS}" "${version}" "${xen_version}" true \
+-		    "single ${GRUB_CMDLINE_LINUX}" "${GRUB_CMDLINE_XEN}" "${tboot_version}" "logging=serial,vga,memory" "iommu=force"
++			    "single ${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_XEN_TBOOT}" \
++			    "${GRUB_CMDLINE_XEN} ${GRUB_CMDLINE_XEN_TBOOT}" \
++			    "${tboot_version}" "${GRUB_CMDLINE_TBOOT}" "iommu=force"
+             fi
+ 
+             list=`echo $list | tr ' ' '\n' | grep -vx $linux | tr '\n' ' '`
+-- 
+1.7.1
+

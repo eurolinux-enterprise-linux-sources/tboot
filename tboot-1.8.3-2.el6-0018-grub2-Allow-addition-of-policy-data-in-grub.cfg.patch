@@ -1,0 +1,112 @@
+From f67d2f291fbd4988c13d533fcc090a9bf8580358 Mon Sep 17 00:00:00 2001
+From: Martin Wilck <martin.wilck@ts.fujitsu.com>
+Date: Wed, 24 Feb 2016 13:44:39 +0100
+Subject: grub2: Allow addition of policy data in grub.cfg
+
+Allow user to set GRUB_TBOOT_POLICY_DATA to a file name
+in /etc/default/grub-tboot. If nonempty and found, the file
+will be added to the tboot section in grub.cfg.
+
+This is necessary to support list policy for tboot.
+---
+ tboot/20_linux_tboot     |   17 +++++++++++++++++
+ tboot/20_linux_xen_tboot |   17 +++++++++++++++++
+ 2 files changed, 34 insertions(+), 0 deletions(-)
+
+diff --git a/tboot/20_linux_tboot b/tboot/20_linux_tboot
+index 0039843..05d1366 100644
+--- a/tboot/20_linux_tboot
++++ b/tboot/20_linux_tboot
+@@ -36,10 +36,13 @@ fi
+ # (empty values are treated as if the variables were unset).
+ [ -z "${GRUB_CMDLINE_TBOOT}" ] && unset GRUB_CMDLINE_TBOOT
+ [ -z "${GRUB_CMDLINE_LINUX_TBOOT}" ] && unset GRUB_CMDLINE_LINUX_TBOOT
++[ -z "${GRUB_TBOOT_POLICY_DATA}" ] && unset GRUB_TBOOT_POLICY_DATA
+ # Command line for tboot itself
+ : ${GRUB_CMDLINE_TBOOT='logging=serial,memory,vga'}
+ # Linux kernel parameters to append for tboot
+ : ${GRUB_CMDLINE_LINUX_TBOOT='intel_iommu=on'}
++# Base name of LCP policy data file for list policy
++: ${GRUB_TBOOT_POLICY_DATA=''}
+ 
+ # VGA logging is not supported in UEFI environment
+ if [ -d /sys/firmware/efi ]; then
+@@ -148,6 +151,13 @@ EOF
+ EOF
+     done
+   fi
++  if test -n "${poldata_file}" ; then
++    message="$(gettext_printf "Loading tboot policy data file ${poldata_file} ...")"
++    cat << EOF
++	echo	'$message'
++	${mb_mod_directive} ${rel_dirname}/${poldata_file}
++EOF
++  fi
+   cat << EOF
+ }
+ EOF
+@@ -165,6 +175,13 @@ sinit_list=`for i in /boot/*sinit* /boot/*SINIT*; do
+         basename=$(basename $i)
+         if grub_file_is_not_garbage "$i" ; then echo -n "$basename " ; fi
+       done`
++if [ -n "${GRUB_TBOOT_POLICY_DATA}" ]; then
++  if grub_file_is_not_garbage "/boot/${GRUB_TBOOT_POLICY_DATA}"; then
++    poldata_file=${GRUB_TBOOT_POLICY_DATA}
++  else
++    echo "ERROR in $0: GRUB_TBOOT_POLICY_DATA=${GRUB_TBOOT_POLICY_DATA} not found in /boot, check ${sysconfdir}/default/grub-tboot" >&2
++  fi
++fi
+ prepare_boot_cache=
+ 
+ while [ "x${tboot_list}" != "x" ] && [ "x$linux_list" != "x" ] ; do
+diff --git a/tboot/20_linux_xen_tboot b/tboot/20_linux_xen_tboot
+index 56e0153..5d0a839 100644
+--- a/tboot/20_linux_xen_tboot
++++ b/tboot/20_linux_xen_tboot
+@@ -37,12 +37,15 @@ fi
+ [ -z "${GRUB_CMDLINE_TBOOT}" ] && unset GRUB_CMDLINE_TBOOT
+ [ -z "${GRUB_CMDLINE_XEN_TBOOT}" ] && unset GRUB_CMDLINE_XEN_TBOOT
+ [ -z "${GRUB_CMDLINE_LINUX_XEN_TBOOT}" ] && unset GRUB_CMDLINE_LINUX_XEN_TBOOT
++[ -z "${GRUB_TBOOT_POLICY_DATA}" ] && unset GRUB_TBOOT_POLICY_DATA
+ # Command line for tboot itself
+ : ${GRUB_CMDLINE_TBOOT='logging=serial,memory,vga'}
+ # Xen parameters to append for tboot
+ : ${GRUB_CMDLINE_XEN_TBOOT=''}
+ # Linux kernel parameters to append for tboot + Xen
+ : ${GRUB_CMDLINE_LINUX_XEN_TBOOT=''}
++# Base name of LCP policy data file for list policy
++: ${GRUB_TBOOT_POLICY_DATA=''}
+ 
+ export TEXTDOMAIN=grub
+ export TEXTDOMAINDIR=${prefix}/share/locale
+@@ -141,6 +144,13 @@ EOF
+ EOF
+     done
+   fi
++  if test -n "${poldata_file}" ; then
++    message="$(gettext_printf "Loading tboot policy data file ${poldata_file} ...")"
++    cat << EOF
++	echo	'$message'
++	module  ${rel_dirname}/${poldata_file}
++EOF
++  fi
+   cat << EOF
+ }
+ EOF
+@@ -174,6 +184,13 @@ sinit_list=`for i in /boot/*sinit* /boot/*SINIT*; do
+         basename=$(basename $i)
+         if grub_file_is_not_garbage "$i" ; then echo -n "$basename " ; fi
+       done`
++if [ -n "${GRUB_TBOOT_POLICY_DATA}" ]; then
++  if grub_file_is_not_garbage "/boot/${GRUB_TBOOT_POLICY_DATA}"; then
++    poldata_file=${GRUB_TBOOT_POLICY_DATA}
++  else
++    echo "ERROR in $0: GRUB_TBOOT_POLICY_DATA=${GRUB_TBOOT_POLICY_DATA} not found in /boot, check ${sysconfdir}/default/grub-tboot" >&2
++  fi
++fi
+ prepare_boot_cache=
+ 
+ while [ "x${xen_list}" != "x" ] ; do
+-- 
+1.7.1
+

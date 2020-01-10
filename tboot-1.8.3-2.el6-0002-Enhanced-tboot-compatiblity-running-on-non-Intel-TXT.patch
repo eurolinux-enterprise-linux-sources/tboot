@@ -1,0 +1,31 @@
+From 10e9223ff18792c8df8099f037ca6fcfc848097c Mon Sep 17 00:00:00 2001
+From: Ning Sun <ning.sun@intel.com>
+Date: Mon, 18 May 2015 09:23:35 -0700
+Subject: Enhanced tboot compatiblity running on non-Intel TXT platform
+
+... with a fix of is_launched() reported by Ahmed, Safayet (GE Global
+Research) <Safayet.Ahmed@ge.com>
+
+Signed-off-by Ning Sun <ning.sun@intel.com>
+---
+ tboot/common/tboot.c |    4 +++-
+ 1 files changed, 3 insertions(+), 1 deletions(-)
+
+diff --git a/tboot/common/tboot.c b/tboot/common/tboot.c
+index d78a474..e49d2da 100644
+--- a/tboot/common/tboot.c
++++ b/tboot/common/tboot.c
+@@ -115,7 +115,9 @@ static tb_error_t verify_platform(void)
+ 
+ static bool is_launched(void)
+ {
+-    return txt_is_launched();
++    if ( supports_txt() == TB_ERR_NONE )
++        return txt_is_launched();
++    else return false;
+ }
+ 
+ static bool prepare_cpu(void)
+-- 
+1.7.1
+

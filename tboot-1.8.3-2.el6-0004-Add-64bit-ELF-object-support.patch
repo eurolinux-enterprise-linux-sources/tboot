@@ -1,0 +1,272 @@
+From 261ab4de9167b11bb5b24f4fb6f9a266fb2f8b09 Mon Sep 17 00:00:00 2001
+From: Ning Sun <ning.sun@intel.com>
+Date: Wed, 3 Jun 2015 13:59:58 -0700
+Subject: Add 64bit ELF object support
+
+Signed-off-by Ning Sun <ning.sun@intel.com>
+---
+ include/elf_defns.h   |   35 +++++++++++++
+ tboot/common/elf.c    |  134 ++++++++++++++++++++++++++++++++++--------------
+ tboot/common/tpm_20.c |    2 +-
+ 3 files changed, 131 insertions(+), 40 deletions(-)
+
+diff --git a/include/elf_defns.h b/include/elf_defns.h
+index 83ada5a..442630b 100644
+--- a/include/elf_defns.h
++++ b/include/elf_defns.h
+@@ -54,6 +54,29 @@ typedef struct {
+     uint16_t e_shstrndx;
+ } elf_header_t;
+ 
++/* elf64_header_t */
++typedef struct {
++unsigned char e_ident[16]; /* ELF identification */
++uint16_t e_type; /* Object file type */
++uint16_t e_machine; /* Machine type */
++uint32_t e_version; /* Object file version */
++uint64_t e_entry; /* Entry point address */
++uint64_t e_phoff; /* Program header offset */
++uint64_t e_shoff; /* Section header offset */
++uint32_t e_flags; /* Processor-specific flags */
++uint16_t e_ehsize; /* ELF header size */
++uint16_t e_phentsize; /* Size of program header entry */
++uint16_t e_phnum; /* Number of program header entries */
++uint16_t e_shentsize; /* Size of section header entry */
++uint16_t e_shnum; /* Number of section header entries */
++uint16_t e_shstrndx; /* Section name string table index */
++} elf64_header_t;
++
++
++
++
++
++
+ /* e_ident[] Identification Indexes */
+ #define EI_MAG0        0         /* File identification */
+ #define EI_MAG1        1         /* File identification */
+@@ -100,6 +123,7 @@ typedef struct {
+ #define EM_860         7         /* Intel 80860 */
+ #define EM_MIPS        8         /* MIPS RS3000 Big-Endian */
+ #define EM_MIPS_RS4_BE 10        /* MIPS RS4000 Big-Endian */
++#define EM_AMD64	62		/* AMDs x86-64 architecture */
+ 
+ /* e_version */
+ #define EV_NONE        0         /* Invalid version */
+@@ -117,6 +141,17 @@ typedef struct {
+     uint32_t p_align;
+ } elf_program_header_t;
+ 
++typedef struct{
++uint32_t p_type; /* Type of segment */
++uint32_t p_flags; /* Segment attributes */
++uint64_t p_offset; /* Offset in file */
++uint64_t p_vaddr; /* Virtual address in memory */
++uint64_t p_paddr; /* Reserved */
++uint64_t p_filesz; /* Size of segment in file */
++uint64_t p_memsz; /* Size of segment in memory */
++uint64_t p_align; /* Alignment of segment */
++} elf64_program_header_t;
++
+ /* p_type */
+ #define PT_NULL        0
+ #define PT_LOAD        1
+diff --git a/tboot/common/elf.c b/tboot/common/elf.c
+index e7fc0d5..9a15944 100644
+--- a/tboot/common/elf.c
++++ b/tboot/common/elf.c
+@@ -44,11 +44,12 @@
+ #include <elf_defns.h>
+ 
+ extern loader_ctx *g_ldr_ctx;
++bool elf64 = false;
+ 
+ bool is_elf_image(const void *image, size_t size)
+ {
+     elf_header_t *elf;
+-
++   
+     if ( image == NULL ) {
+         printk(TBOOT_ERR"Error: Pointer is zero.\n");
+         return false;
+@@ -70,39 +71,78 @@ bool is_elf_image(const void *image, size_t size)
+         printk(TBOOT_WARN"Error: ELF magic number is not matched.\n");
+         return false;
+     }
+-
+     /* check data encoding in ELF */
+     if ( elf->e_ident[EI_DATA] != ELFDATA2LSB ) {
+         printk(TBOOT_ERR"Error: ELF data encoding is not the least significant "
+                "byte occupying the lowest address.\n");
+         return false;
+     }
++ 
++    /* check obj class in ELF */
++    if ( elf->e_ident[EI_CLASS] == ELFCLASS32 ) {
++        printk(TBOOT_INFO"This is an ELF32 file.\n");
++	elf64 = false;
++        elf_header_t *elf;
++        elf = (elf_header_t *)image;
++        /* check ELF image is executable? */
++        if ( elf->e_type != ET_EXEC ) {
++           printk(TBOOT_ERR"Error: ELF image is not executable.\n");
++           return false;
++        }
+ 
+-    /* check ELF image is executable? */
+-    if ( elf->e_type != ET_EXEC ) {
+-        printk(TBOOT_ERR"Error: ELF image is not executable.\n");
+-        return false;
+-    }
++        /* check ELF image is for IA? */
++        if ( elf->e_machine != EM_386 && elf->e_machine != EM_AMD64 ) {
++            printk(TBOOT_ERR"Error: ELF image is not for IA.\n");
++            return false;
++        }
+ 
+-    /* check ELF image is for IA? */
+-    if ( elf->e_machine != EM_386 ) {
+-        printk(TBOOT_ERR"Error: ELF image is not for IA.\n");
+-        return false;
+-    }
++        /* check ELF version is valid? */
++         if ( elf->e_version != EV_CURRENT ) {
++            printk(TBOOT_ERR"Error: ELF version is invalid.\n");
++            return false;
++         }
+ 
+-    /* check ELF version is valid? */
+-    if ( elf->e_version != EV_CURRENT ) {
+-        printk(TBOOT_ERR"Error: ELF version is invalid.\n");
+-        return false;
+-    }
++         if ( sizeof(elf_program_header_t) > elf->e_phentsize ) {
++            printk(TBOOT_ERR"Error: Program size is smaller than program "
++               "header size.\n");
++            return false;
++         }
++
++      return true;
++      }
++      if ( elf->e_ident[EI_CLASS] == ELFCLASS64 ) {
++         printk(TBOOT_INFO"This is an ELF64 file.\n");
++	 elf64 = true;
++         elf64_header_t *elf;
++         elf = (elf64_header_t *)image;
++   
++         /* check ELF image is executable? */
++         if ( elf->e_type != ET_EXEC ) {
++            printk(TBOOT_ERR"Error: ELF image is not executable.\n");
++            return false;
++         }
++
++         /* check ELF image is for IA? */
++         if ( elf->e_machine != EM_386 && elf->e_machine != EM_AMD64) {
++            printk(TBOOT_ERR"Error: ELF image is not for IA.\n");
++            return false;
++         }
++
++         /* check ELF version is valid? */
++         if ( elf->e_version != EV_CURRENT ) {
++            printk(TBOOT_ERR"Error: ELF version is invalid.\n");
++            return false;
++         }
+ 
+-    if ( sizeof(elf_program_header_t) > elf->e_phentsize ) {
+-        printk(TBOOT_ERR"Error: Program size is smaller than program "
++         if ( sizeof(elf64_program_header_t) > elf->e_phentsize ) {
++            printk(TBOOT_ERR"Error: Program size is smaller than program "
+                "header size.\n");
+-        return false;
+-    }
++            return false;
++         }
+ 
+-    return true;
++       return true;
++       }
++    return false;
+ }
+ 
+ #if 0
+@@ -150,9 +190,9 @@ static bool get_elf_image_range(const elf_header_t *elf, void **start,
+ }
+ #endif
+ 
+-bool expand_elf_image(const elf_header_t *elf, void **entry_point)
++bool expand_elf_image(const void *image, void **entry_point)
+ {
+-    if ( elf == NULL ) {
++    if ( image == NULL ) {
+         printk(TBOOT_ERR"Error: ELF header pointer is zero.\n");
+         return false;
+     }
+@@ -163,22 +203,38 @@ bool expand_elf_image(const elf_header_t *elf, void **entry_point)
+     }
+ 
+     /* assumed that already passed is_elf_image() check */
+-
+-    /* load elf image into memory */
+-    for ( int i = 0; i < elf->e_phnum; i++ ) {
+-        elf_program_header_t *ph = (elf_program_header_t *)
+-                         ((void *)elf + elf->e_phoff + i*elf->e_phentsize);
+-
+-        if ( ph->p_type == PT_LOAD ) {
+-            memcpy((void *)ph->p_paddr, (void *)elf + ph->p_offset,
+-                   ph->p_filesz);
+-            memset((void *)(ph->p_paddr + ph->p_filesz), 0,
+-                   ph->p_memsz - ph->p_filesz);
+-        }
++    if (elf64) {
++       elf64_header_t *elf;
++       elf = (elf64_header_t *)image;
++       
++       /* load elf image into memory */
++       for ( int i = 0; i < elf->e_phnum; i++ ) {
++           elf64_program_header_t *ph = (elf64_program_header_t *)((void *)elf + elf->e_phoff + i*elf->e_phentsize);
++           if ( ph->p_type == PT_LOAD ) {
++              memcpy((void *)(unsigned long)ph->p_paddr, (void *)elf +(unsigned long) ph->p_offset,(unsigned long) ph->p_filesz);
++              //memcpy((void *)ph->p_paddr, (void *)elf + ph->p_offset, ph->p_filesz);
++              memset((void *)(unsigned long)(ph->p_paddr + ph->p_filesz), 0, (unsigned long)ph->p_memsz -(unsigned long) ph->p_filesz);
++              //memset((void *)(ph->p_paddr + ph->p_filesz), 0, ph->p_memsz - ph->p_filesz);
++           }
++       }
++       *entry_point = (void *)(unsigned long)(elf->e_entry);
++       //*entry_point = (void *)(elf->e_entry);
++       return true;
++    }
++    else {
++       elf_header_t *elf;
++       elf  = (elf_header_t *)image;
++       /* load elf image into memory */
++       for ( int i = 0; i < elf->e_phnum; i++ ) {
++           elf_program_header_t *ph = (elf_program_header_t *)((void *)elf + elf->e_phoff + i*elf->e_phentsize);
++           if ( ph->p_type == PT_LOAD ) {
++              memcpy((void *)ph->p_paddr, (void *)elf + ph->p_offset, ph->p_filesz);
++              memset((void *)(ph->p_paddr + ph->p_filesz), 0, ph->p_memsz - ph->p_filesz);
++           }
++       }
++      *entry_point = (void *)elf->e_entry;
++      return true;
+     }
+-
+-    *entry_point = (void *)elf->e_entry;
+-    return true;
+ }
+ 
+ bool jump_elf_image(void *entry_point, uint32_t magic)
+diff --git a/tboot/common/tpm_20.c b/tboot/common/tpm_20.c
+index dec5c5b..ca6853a 100644
+--- a/tboot/common/tpm_20.c
++++ b/tboot/common/tpm_20.c
+@@ -2199,7 +2199,7 @@ static bool tpm20_init(struct tpm_if *ti)
+             ti->alg_count++;
+         }
+     }
+-    printk(TBOOT_INFO"TPM: supported alg cout = %08X\n", ti->alg_count);
++    printk(TBOOT_INFO"TPM: supported alg count = %08X\n", ti->alg_count);
+     for (unsigned int i=0; i<ti->alg_count; i++)
+         printk(TBOOT_INFO"\t\t %08X\n", ti->algs[i]);
+ 
+-- 
+1.7.1
+
