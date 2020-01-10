@@ -21,10 +21,45 @@ prefix=/usr
 exec_prefix=${prefix}
 bindir=${exec_prefix}/bin
 libdir=${exec_prefix}/lib
+sysconfdir=/etc
 if test -e /usr/share/grub/grub-mkconfig_lib; then
   . /usr/share/grub/grub-mkconfig_lib
 elif test -e ${libdir}/grub/grub-mkconfig_lib; then
   . ${libdir}/grub/grub-mkconfig_lib
+fi
+
+if test -e ${sysconfdir}/default/grub-tboot; then
+  .  ${sysconfdir}/default/grub-tboot
+fi
+
+# Set the following variables in /etc/default/grub-tboot to customize command lines
+# (empty values are treated as if the variables were unset).
+[ -z "${GRUB_CMDLINE_TBOOT}" ] && unset GRUB_CMDLINE_TBOOT
+[ -z "${GRUB_CMDLINE_LINUX_TBOOT}" ] && unset GRUB_CMDLINE_LINUX_TBOOT
+[ -z "${GRUB_TBOOT_POLICY_DATA}" ] && unset GRUB_TBOOT_POLICY_DATA
+# Command line for tboot itself
+: ${GRUB_CMDLINE_TBOOT='logging=serial,memory,vga'}
+# Linux kernel parameters to append for tboot
+: ${GRUB_CMDLINE_LINUX_TBOOT='intel_iommu=on'}
+# Base name of LCP policy data file for list policy
+: ${GRUB_TBOOT_POLICY_DATA=''}
+
+# VGA logging is not supported in UEFI environment
+if [ -d /sys/firmware/efi ]; then
+  _cmdline=
+  for _arg in ${GRUB_CMDLINE_TBOOT}; do
+    case ${_arg} in
+      logging=*vga*)
+	echo "UEFI environment: deactivating VGA logging for tboot" >&2
+	_arg=`echo "${_arg}" | sed -e 's/=vga,/=/' -e s'/,\{0,1\}vga//' -e s'/=$/=none/'`;;
+    esac
+    if [ -z "${_cmdline}" ]; then
+      _cmdline=${_arg}
+    else
+      _cmdline="${_cmdline} ${_arg}"
+    fi
+  done
+  GRUB_CMDLINE_TBOOT=${_cmdline}
 fi
 
 export TEXTDOMAIN=grub
@@ -54,6 +89,12 @@ if [ "x${GRUB_DEVICE_UUID}" = "x" ] || [ "x${GRUB_DISABLE_LINUX_UUID}" = "xtrue"
 else
   LINUX_ROOT_DEVICE=UUID=${GRUB_DEVICE_UUID}
 fi
+
+# Merge all sequences of spaces into a single space, like GRUB2 does during boot.
+# Simplistic, doesn't check for quoting, but should be good enough for the kernel command line.
+merge_spaces() {
+  echo "$*" | sed -e 's/ \{1,\}/ /g' -e 's/^ //' -e 's/ $//'
+}
 
 linux_entry ()
 {
@@ -94,17 +135,19 @@ linux_entry ()
   printf '%s\n' "${prepare_boot_cache}"
   xmessage="$(gettext_printf "Loading tboot %s ..." ${tboot_version})"
   lmessage="$(gettext_printf "Loading Linux %s ..." ${version})"
+  tbargs=`merge_spaces ${tboot_args}`
+  lxargs=`merge_spaces root=${linux_root_device_thisversion} ro ${args} ${iommu_args} ${mb_extra_kernel}`
   cat << EOF
 	echo	'$xmessage'
-	${mb_directive}	${rel_tboot_dirname}/${tboot_basename} ${rel_tboot_dirname}/${tboot_basename} ${tboot_args}
+	${mb_directive}	${rel_tboot_dirname}/${tboot_basename} ${tbargs}
 	echo	'$lmessage'
-	${mb_mod_directive} ${rel_dirname}/${basename} ${rel_dirname}/${basename} root=${linux_root_device_thisversion} ro ${args} ${iommu_args} ${mb_extra_kernel}
+	${mb_mod_directive} ${rel_dirname}/${basename} ${lxargs}
 EOF
   if test -n "${initrd}" ; then
     message="$(gettext_printf "Loading initial ramdisk ...")"
     cat << EOF
 	echo	'$message'
-	${mb_mod_directive} ${rel_dirname}/${initrd} ${rel_dirname}/${initrd}
+	${mb_mod_directive} ${rel_dirname}/${initrd}
 EOF
   fi
   if test -n "${sinit_list}" ; then
@@ -112,9 +155,16 @@ EOF
       message="$(gettext_printf "Loading sinit $i ...")"
       cat << EOF
 	echo	'$message'
-	${mb_mod_directive} ${rel_dirname}/${i} ${rel_dirname}/${i}
+	${mb_mod_directive} ${rel_dirname}/${i}
 EOF
     done
+  fi
+  if test -n "${poldata_file}" ; then
+    message="$(gettext_printf "Loading tboot policy data file ${poldata_file} ...")"
+    cat << EOF
+	echo	'$message'
+	${mb_mod_directive} ${rel_dirname}/${poldata_file}
+EOF
   fi
   cat << EOF
 }
@@ -133,6 +183,13 @@ sinit_list=`for i in /boot/*sinit* /boot/*SINIT*; do
         basename=$(basename $i)
         if grub_file_is_not_garbage "$i" ; then echo -n "$basename " ; fi
       done`
+if [ -n "${GRUB_TBOOT_POLICY_DATA}" ]; then
+  if grub_file_is_not_garbage "/boot/${GRUB_TBOOT_POLICY_DATA}"; then
+    poldata_file=${GRUB_TBOOT_POLICY_DATA}
+  else
+    echo "ERROR in $0: GRUB_TBOOT_POLICY_DATA=${GRUB_TBOOT_POLICY_DATA} not found in /boot, check ${sysconfdir}/default/grub-tboot" >&2
+  fi
+fi
 prepare_boot_cache=
 
 while [ "x${tboot_list}" != "x" ] && [ "x$linux_list" != "x" ] ; do
@@ -142,7 +199,7 @@ while [ "x${tboot_list}" != "x" ] && [ "x$linux_list" != "x" ] ; do
     tboot_dirname=`dirname ${current_tboot}`
     rel_tboot_dirname=`make_system_path_relative_to_its_root $tboot_dirname`
 #    tboot_version=`echo $tboot_basename | sed -e "s,.gz$,,g;s,^tboot-,,g"`
-    tboot_version="1.8.3"
+    tboot_version="1.9.4"
     echo "submenu \"tboot ${tboot_version}\" {"
     while [ "x$list" != "x" ] ; do
 	linux=`version_find_latest $list`
@@ -173,18 +230,13 @@ while [ "x${tboot_list}" != "x" ] && [ "x$linux_list" != "x" ] ; do
 	    linux_root_device_thisversion=${GRUB_DEVICE}
 	fi
 	
-	if [ -d /sys/firmware/efi ] ; then
-	    # there's no vga console available under EFI
-	    tboot_log="logging=serial,memory"
-	else
-	    tboot_log="logging=serial,vga,memory"
-	fi
-
 	linux_entry "${OS}" "${version}" "${tboot_version}" false \
-	    "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}" ${tboot_log} "intel_iommu=on"
+		    "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}" "${GRUB_CMDLINE_TBOOT}" \
+		    "${GRUB_CMDLINE_LINUX_TBOOT}"
 	if [ "x${GRUB_DISABLE_RECOVERY}" != "xtrue" ]; then
 	    linux_entry "${OS}" "${version}" "${tboot_version}" true \
-		"single ${GRUB_CMDLINE_LINUX}" ${tboot_log} "intel_iommu=on"
+			"single ${GRUB_CMDLINE_LINUX}" "${GRUB_CMDLINE_TBOOT}" \
+			"${GRUB_CMDLINE_LINUX_TBOOT}"
 	fi
 
 	list=`echo $list | tr ' ' '\n' | grep -vx $linux | tr '\n' ' '`

@@ -74,7 +74,7 @@ typedef struct {
     uint8_t      rsa2048_pubkey[256];
     uint32_t     pub_exp;
     uint8_t      rsa2048_sig[256];
-    uint32_t     scratch[143];
+    uint32_t     scratch[143];//
     uint8_t      user_area[];
 } acm_hdr_t;
 extern acm_hdr_t *g_sinit;
@@ -93,7 +93,8 @@ typedef union {
     struct {
         uint32_t  ext_policy        : 2;
         uint32_t  tpm_family        : 4;
-        uint32_t  reserved          : 26;
+        uint32_t  tpm_nv_index_set  : 1;
+        uint32_t  reserved          : 25;
     };
 } tpm_cap_t;
 

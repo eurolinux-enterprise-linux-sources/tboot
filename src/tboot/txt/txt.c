@@ -69,6 +69,7 @@
 /* counter timeout for waiting for all APs to enter wait-for-sipi */
 #define AP_WFS_TIMEOUT     0x01000000
 
+__data struct acpi_rsdp g_rsdp;
 extern char _start[];             /* start of module */
 extern char _end[];               /* end of module */
 extern char _mle_start[];         /* start of text section */
@@ -82,11 +83,11 @@ extern struct mutex ap_lock;
 
 /* MLE/kernel shared data page (in boot.S) */
 extern tboot_shared_t _tboot_shared;
-
 extern void apply_policy(tb_error_t error);
 extern void cpu_wakeup(uint32_t cpuid, uint32_t sipi_vec);
 extern void print_event(const tpm12_pcr_event_t *evt);
 extern void print_event_2(void *evt, uint16_t alg);
+
 
 /*
  * this is the structure whose addr we'll put in TXT heap
@@ -160,7 +161,7 @@ static void *build_mle_pagetable(uint32_t mle_start, uint32_t mle_size)
     void *pg_dir_ptr_tab, *pg_dir, *pg_tab;
     uint64_t *pte;
 
-    printk(TBOOT_DETA"MLE start=%x, end=%x, size=%x\n", 
+    printk(TBOOT_DETA"MLE start=0x%x, end=0x%x, size=0x%x\n", 
            mle_start, mle_start+mle_size, mle_size);
     if ( mle_size > 512*PAGE_SIZE ) {
         printk(TBOOT_ERR"MLE size too big for single page table\n");
@@ -429,8 +430,7 @@ __data acm_hdr_t *g_sinit = 0;
 /*
  * sets up TXT heap
  */
-static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
-                                 loader_ctx *lctx)
+static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *lctx)
 {
     txt_heap_t *txt_heap;
     uint64_t *size;
@@ -533,7 +533,8 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
                 os_sinit_data->efi_rsdt_ptr = (uint64_t) rsdp->rsdp1.rsdt;
             } else {
                 /* rsdp */
-                os_sinit_data->efi_rsdt_ptr = (uint64_t)((uint32_t) rsdp);
+                memcpy((void *)&g_rsdp, rsdp, sizeof(struct acpi_rsdp));
+                os_sinit_data->efi_rsdt_ptr = (uint64_t)((uint32_t)&g_rsdp);
             }
         } else {
             /* per discussions--if we don't have an ACPI pointer, die */
@@ -683,15 +684,15 @@ tb_error_t txt_launch_environment(loader_ctx *lctx)
     /*
      * find correct SINIT AC module in modules list
      */
-    find_platform_sinit_module(lctx, (void **)&g_sinit, NULL);
+    // find_platform_sinit_module(lctx, (void **)&g_sinit, NULL);
     /* if it is newer than BIOS-provided version, then copy it to */
     /* BIOS reserved region */
-    g_sinit = copy_sinit(g_sinit);
-    if ( g_sinit == NULL )
-        return TB_ERR_SINIT_NOT_PRESENT;
+    // g_sinit = copy_sinit(g_sinit);
+    // if ( g_sinit == NULL )
+    //    return TB_ERR_SINIT_NOT_PRESENT;
     /* do some checks on it */
-    if ( !verify_acmod(g_sinit) )
-        return TB_ERR_ACMOD_VERIFY_FAILED;
+    // if ( !verify_acmod(g_sinit) )
+     //   return TB_ERR_ACMOD_VERIFY_FAILED;
 
     /* print some debug info */
     print_file_info();
@@ -717,7 +718,29 @@ tb_error_t txt_launch_environment(loader_ctx *lctx)
     if ( !set_mtrrs_for_acmod(g_sinit) )
         return TB_ERR_FATAL;
 
-    printk(TBOOT_INFO"executing GETSEC[SENTER]...\n");
+   /* deactivate current locality */
+   if (g_tpm_family == TPM_IF_20_CRB ) {
+       printk(TBOOT_INFO"Relinquish CRB localility 0 before executing GETSEC[SENTER]...\n");
+	if (!tpm_relinquish_locality_crb(0)){
+		printk(TBOOT_INFO"Relinquish CRB locality 0 failed...\n");
+		apply_policy(TB_ERR_TPM_NOT_READY) ;
+	}
+   }
+
+   /*{
+   tpm_reg_loc_ctrl_t    reg_loc_ctrl;
+   tpm_reg_loc_state_t  reg_loc_state;
+   
+   reg_loc_ctrl._raw[0] = 0;
+   reg_loc_ctrl.relinquish = 1;
+   write_tpm_reg(0, TPM_REG_LOC_CTRL, &reg_loc_ctrl);
+   printk(TBOOT_INFO"Relinquish CRB localility 0 before executing GETSEC[SENTER]...\n");
+   read_tpm_reg(0, TPM_REG_LOC_STATE, &reg_loc_state);
+   printk(TBOOT_INFO"CRB reg_loc_state.active_locality is 0x%x \n", reg_loc_state.active_locality);
+   printk(TBOOT_INFO"CRB reg_loc_state.loc_assigned is 0x%x \n", reg_loc_state.loc_assigned);
+   }*/
+   
+   printk(TBOOT_INFO"executing GETSEC[SENTER]...\n");
     /* (optionally) pause before executing GETSEC[SENTER] */
     if ( g_vga_delay > 0 )
         delay(g_vga_delay * 1000);
@@ -921,8 +944,7 @@ void txt_post_launch(void)
     /* restore pre-SENTER IA32_MISC_ENABLE_MSR (no verification needed)
        (do after AP wakeup so that if restored MSR has MWAIT clear it won't
        prevent wakeup) */
-    printk(TBOOT_DETA"saved IA32_MISC_ENABLE = 0x%08x\n",
-           os_mle_data->saved_misc_enable_msr);
+    printk(TBOOT_DETA"saved IA32_MISC_ENABLE = 0x%08x\n", os_mle_data->saved_misc_enable_msr);
     wrmsr(MSR_IA32_MISC_ENABLE, os_mle_data->saved_misc_enable_msr);
     if ( use_mwait() ) {
         /* set MONITOR/MWAIT support */

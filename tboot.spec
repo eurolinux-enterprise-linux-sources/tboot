@@ -1,7 +1,7 @@
 Summary:        Performs a verified launch using Intel TXT
 Name:           tboot
-Version:        1.8.3
-Release:        2%{?dist}
+Version:        1.9.4
+Release:        3%{?dist}
 
 Group:          System Environment/Base
 License:        BSD
@@ -9,27 +9,7 @@ URL:            http://sourceforge.net/projects/tboot/
 Source0:        http://downloads.sourceforge.net/%{name}/%{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
-Patch01:	tboot-%{version}-%{release}-0001-Disable-fstack-check-in-CFLAG-for-compatibility-with.patch
-Patch02:	tboot-%{version}-%{release}-0002-Enhanced-tboot-compatiblity-running-on-non-Intel-TXT.patch
-Patch03:	tboot-%{version}-%{release}-0003-This-is-a-fix-for-Gentoo-Hardened.patch
-Patch04:	tboot-%{version}-%{release}-0004-Add-64bit-ELF-object-support.patch
-Patch05:	tboot-%{version}-%{release}-0005-Correct-a-typo-of-lcp2_mlehash-command-parameter-in-.patch
-Patch06:	tboot-%{version}-%{release}-0006-Updated-TPM-2.0-SGX-NV-Index-to-0x01800004.patch
-Patch07:	tboot-%{version}-%{release}-0007-Some-changes-were-made-to-avoid-stack-overflow.patch
-Patch08:	tboot-%{version}-%{release}-0008-Fixed-a-minor-bug-in-txt-stat-tool.patch
-Patch09:	tboot-%{version}-%{release}-0009-Revisited-and-fixed-a-security-vulnerability.patch
-Patch10:	tboot-%{version}-%{release}-0010-Removed-some-redundant-codes-in-loader.c.patch
-Patch11:	tboot-%{version}-%{release}-0011-1.-Mitigated-S3-resume-delay-by-adjusting-LZ_MAX_OFF.patch
-Patch12:	tboot-%{version}-%{release}-0012-Added-an-ACPI_RSDP-structure-g_rsdp-in-tboot.patch
-Patch13:	tboot-%{version}-%{release}-0013-Make-a-minor-change-to-tboot.c.patch
-Patch14:	tboot-%{version}-%{release}-0014-Added-TPM-2.0-CRB-Command-Response-Buffer-interface-.patch
-Patch15:	tboot-%{version}-%{release}-0015-Don-t-skip-first-argument-in-Linux-kernel-command-li.patch
-Patch16:	tboot-%{version}-%{release}-0016-grub2-xen-insert-just-one-dummy-command-line-argumen.patch
-Patch17:	tboot-%{version}-%{release}-0017-grub2-support-allow-the-user-to-customize-the-comman.patch
-Patch18:	tboot-%{version}-%{release}-0018-grub2-Allow-addition-of-policy-data-in-grub.cfg.patch
-Patch19:	tboot-%{version}-%{release}-0019-grub2-sanitize-whitespace-in-command-lines.patch
-Patch20:	tboot-%{version}-%{release}-0020-grub2-tboot-doesn-t-skip-first-argument-any-more.patch
-Patch21:	tboot-%{version}-%{release}-0021-Add-TCG-2.0-compliant-NV-indices-support.patch
+Patch01:	tboot-%{version}-%{release}-0001-MANPATH-should-not-be-used-as-install-dir.patch
 
 BuildRequires:  trousers-devel
 BuildRequires:  openssl-devel
@@ -42,31 +22,23 @@ and verified launch of an OS kernel/VMM.
 
 %prep
 %setup -q
-%patch01 -p1 -b .0001-Disable-fstack-check-in-CFLAG-for-compatibility-with
-%patch02 -p1 -b .0002-Enhanced-tboot-compatiblity-running-on-non-Intel-TXT
-%patch03 -p1 -b .0003-This-is-a-fix-for-Gentoo-Hardened
-%patch04 -p1 -b .0004-Add-64bit-ELF-object-support
-%patch05 -p1 -b .0005-Correct-a-typo-of-lcp2_mlehash-command-parameter-in-
-%patch06 -p1 -b .0006-Updated-TPM-2.0-SGX-NV-Index-to-0x01800004
-%patch07 -p1 -b .0007-Some-changes-were-made-to-avoid-stack-overflow
-%patch08 -p1 -b .0008-Fixed-a-minor-bug-in-txt-stat-tool
-%patch09 -p1 -b .0009-Revisited-and-fixed-a-security-vulnerability
-%patch10 -p1 -b .0010-Removed-some-redundant-codes-in-loader.c
-%patch11 -p1 -b .0011-1.-Mitigated-S3-resume-delay-by-adjusting-LZ_MAX_OFF
-%patch12 -p1 -b .0012-Added-an-ACPI_RSDP-structure-g_rsdp-in-tboot
-%patch13 -p1 -b .0013-Make-a-minor-change-to-tboot.c
-%patch14 -p1 -b .0014-Added-TPM-2.0-CRB-Command-Response-Buffer-interface-
-%patch15 -p1 -b .0015-Don-t-skip-first-argument-in-Linux-kernel-command-li
-%patch16 -p1
-%patch17 -p1
-%patch18 -p1
-%patch19 -p1
-%patch20 -p1
-%patch21 -p1 -b .0021-Add-TCG-2.0-compliant-NV-indices-support
+%patch01 -p1 -b .0001-MANPATH-should-not-be-used-as-install-dir
 
 %build
 CFLAGS="$RPM_OPT_FLAGS"; export CFLAGS
 make debug=y %{?_smp_mflags}
+
+# If this is a UEFI system, warn user that tboot is not supported and
+# provide links to the advisories.
+#
+%pre
+if [ -e "/sys/firmware/efi" ]; then
+	putk() { echo -e "$1" | tee /dev/kmsg; }
+	putk "WARNING: tboot is not supported on UEFI-based systems."
+	putk "         Please see https://access.redhat.com/articles/2217041."
+	putk "         and https://access.redhat.com/articles/2464721"
+	exit 0;
+fi
 
 %install
 rm -rf $RPM_BUILD_ROOT
@@ -108,6 +80,24 @@ rm -rf $RPM_BUILD_ROOT
 /boot/tboot-syms
 
 %changelog
+* Tue Oct 18 2016 Tony Camuso <tcamuso@redhat.com> - 1.9.4-3
+- Allow install on UEFI platform, but with warning message, in order to
+  permit completion of provisioning. tboot remains unsupported by RHEL
+  on UEFI platforms.
+  This is the -2 release change.
+  Resolves: rhbz#1365140
+- MANPATH should not be used as install dir. Man files should be installed
+  into DISTDIR not into '/' of system.
+  This is the -3 release change.
+  Resolves: rhbz#1321857
+
+* Tue Aug 23 2016 Tony Camuso <tcamuso@redhat.com> - 1.9.4-1
+- Needed an important upsteam fix for bz listed below. Rather than
+  add more patches to the already heavily patched 1.8.3, decided to
+  simply upgrade to 1.9.4, which includes all the patches in 1.8.3-2
+  plus the ones needed to resolve the bz.
+  Resolves rhbz#1323660
+
 * Wed Mar 02 2016 Tony Camuso <tcamuso@redhat.com> - 1.8.3-2
 - Backport important upstream patches
   Resolves rhbz#1313873

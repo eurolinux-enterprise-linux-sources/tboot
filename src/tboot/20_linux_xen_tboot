@@ -21,11 +21,31 @@ prefix=/usr
 exec_prefix=${prefix}
 bindir=${exec_prefix}/bin
 libdir=${exec_prefix}/lib
+sysconfdir=/etc
 if test -e /usr/share/grub/grub-mkconfig_lib; then
   . /usr/share/grub/grub-mkconfig_lib
 elif test -e ${libdir}/grub/grub-mkconfig_lib; then
   . ${libdir}/grub/grub-mkconfig_lib
 fi
+
+if test -e ${sysconfdir}/default/grub-tboot; then
+  .  ${sysconfdir}/default/grub-tboot
+fi
+
+# Set the following variables in /etc/default/grub-tboot to customize command lines
+# (empty values are treated as if the variables were unset).
+[ -z "${GRUB_CMDLINE_TBOOT}" ] && unset GRUB_CMDLINE_TBOOT
+[ -z "${GRUB_CMDLINE_XEN_TBOOT}" ] && unset GRUB_CMDLINE_XEN_TBOOT
+[ -z "${GRUB_CMDLINE_LINUX_XEN_TBOOT}" ] && unset GRUB_CMDLINE_LINUX_XEN_TBOOT
+[ -z "${GRUB_TBOOT_POLICY_DATA}" ] && unset GRUB_TBOOT_POLICY_DATA
+# Command line for tboot itself
+: ${GRUB_CMDLINE_TBOOT='logging=serial,memory,vga'}
+# Xen parameters to append for tboot
+: ${GRUB_CMDLINE_XEN_TBOOT=''}
+# Linux kernel parameters to append for tboot + Xen
+: ${GRUB_CMDLINE_LINUX_XEN_TBOOT=''}
+# Base name of LCP policy data file for list policy
+: ${GRUB_TBOOT_POLICY_DATA=''}
 
 export TEXTDOMAIN=grub
 export TEXTDOMAINDIR=${prefix}/share/locale
@@ -72,6 +92,12 @@ if [ "x`${grub_probe} --device ${GRUB_DEVICE} --target=fs 2>/dev/null || true`" 
   fi
 fi
 
+# Merge all sequences of spaces into a single space, like GRUB2 does during boot.
+# Simplistic, doesn't check for quoting, but should be good enough for the kernel command line.
+merge_spaces() {
+  echo "$*" | sed -e 's/ \{1,\}/ /g' -e 's/^ //' -e 's/ $//'
+}
+
 linux_entry ()
 {
   os="$1"
@@ -100,19 +126,22 @@ linux_entry ()
   xmessage="$(gettext_printf "Loading Xen %s ..." ${xen_version})"
   tmessage="$(gettext_printf "Loading Tboot %s ..." ${tboot_version})"
   lmessage="$(gettext_printf "Loading Linux %s ..." ${version})"
+  tbargs=`merge_spaces ${tboot_args}`
+  xnargs=`merge_spaces ${xen_args} ${iommu_args}`
+  lxargs=`merge_spaces root=${linux_root_device_thisversion} ro ${args}`
   cat << EOF
 	echo	'$tmessage'
-	multiboot	${rel_tboot_dirname}/${tboot_basename} ${rel_tboot_dirname}/${tboot_basename} ${tboot_args}
+	multiboot	${rel_tboot_dirname}/${tboot_basename} ${tbargs}
 	echo	'$xmessage'
-	module	${rel_xen_dirname}/${xen_basename} ${rel_xen_dirname}/${xen_basename} placeholder ${xen_args} ${iommu_args}
+	module	${rel_xen_dirname}/${xen_basename} ${xnargs}
 	echo	'$lmessage'
-	module	${rel_dirname}/${basename} ${rel_dirname}/${basename} placeholder root=${linux_root_device_thisversion} ro ${args}
+	module	${rel_dirname}/${basename} ${lxargs}
 EOF
   if test -n "${initrd}" ; then
     message="$(gettext_printf "Loading initial ramdisk ...")"
     cat << EOF
 	echo	'$message'
-	module	${rel_dirname}/${initrd} ${rel_dirname}/${initrd}
+	module	${rel_dirname}/${initrd}
 EOF
   fi
   if test -n "${sinit_list}" ; then
@@ -120,9 +149,16 @@ EOF
       message="$(gettext_printf "Loading sinit $i ...")"
       cat << EOF
         echo    '$message'
-        module  ${rel_dirname}/${i} ${rel_dirname}/${i}
+        module  ${rel_dirname}/${i}
 EOF
     done
+  fi
+  if test -n "${poldata_file}" ; then
+    message="$(gettext_printf "Loading tboot policy data file ${poldata_file} ...")"
+    cat << EOF
+	echo	'$message'
+	module  ${rel_dirname}/${poldata_file}
+EOF
   fi
   cat << EOF
 }
@@ -157,6 +193,13 @@ sinit_list=`for i in /boot/*sinit* /boot/*SINIT*; do
         basename=$(basename $i)
         if grub_file_is_not_garbage "$i" ; then echo -n "$basename " ; fi
       done`
+if [ -n "${GRUB_TBOOT_POLICY_DATA}" ]; then
+  if grub_file_is_not_garbage "/boot/${GRUB_TBOOT_POLICY_DATA}"; then
+    poldata_file=${GRUB_TBOOT_POLICY_DATA}
+  else
+    echo "ERROR in $0: GRUB_TBOOT_POLICY_DATA=${GRUB_TBOOT_POLICY_DATA} not found in /boot, check ${sysconfdir}/default/grub-tboot" >&2
+  fi
+fi
 prepare_boot_cache=
 
 while [ "x${xen_list}" != "x" ] ; do
@@ -171,7 +214,7 @@ while [ "x${xen_list}" != "x" ] ; do
         tboot_basename=`basename ${current_tboot}`
         tboot_dirname=`dirname ${current_tboot}`
         rel_tboot_dirname=`make_system_path_relative_to_its_root $tboot_dirname`
-        tboot_version="1.8.3"
+        tboot_version="1.9.4"
         list="${linux_list}"
         echo "submenu \"Xen ${xen_version}\" \"Tboot ${tboot_version}\"{"
         while [ "x$list" != "x" ] ; do
@@ -203,10 +246,14 @@ while [ "x${xen_list}" != "x" ] ; do
             fi
 
             linux_entry "${OS}" "${version}" "${xen_version}" false \
-	        "${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT}" "${GRUB_CMDLINE_XEN} ${GRUB_CMDLINE_XEN_DEFAULT}" "${tboot_version}" "logging=serial,vga,memory" "iommu=force"
+			"${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_DEFAULT} ${GRUB_CMDLINE_LINUX_XEN_TBOOT}" \
+			"${GRUB_CMDLINE_XEN} ${GRUB_CMDLINE_XEN_DEFAULT} ${GRUB_CMDLINE_XEN_TBOOT}" \
+			"${tboot_version}" "${GRUB_CMDLINE_TBOOT}" "iommu=force"
             if [ "x${GRUB_DISABLE_RECOVERY}" != "xtrue" ]; then
                 linux_entry "${OS}" "${version}" "${xen_version}" true \
-		    "single ${GRUB_CMDLINE_LINUX}" "${GRUB_CMDLINE_XEN}" "${tboot_version}" "logging=serial,vga,memory" "iommu=force"
+			    "single ${GRUB_CMDLINE_LINUX} ${GRUB_CMDLINE_LINUX_XEN_TBOOT}" \
+			    "${GRUB_CMDLINE_XEN} ${GRUB_CMDLINE_XEN_TBOOT}" \
+			    "${tboot_version}" "${GRUB_CMDLINE_TBOOT}" "iommu=force"
             fi
 
             list=`echo $list | tr ' ' '\n' | grep -vx $linux | tr '\n' ' '`
