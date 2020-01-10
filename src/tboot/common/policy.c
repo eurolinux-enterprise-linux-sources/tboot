@@ -1,7 +1,7 @@
 /*
  * policy.c: support functions for tboot verification launch
  *
- * Copyright (c) 2006-2010, Intel Corporation
+ * Copyright (c) 2006-2014, Intel Corporation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,18 +44,18 @@
 #include <processor.h>
 #include <misc.h>
 #include <uuid.h>
-#include <multiboot.h>
+#include <loader.h>
 #include <hash.h>
 #include <tb_error.h>
 #define PRINT printk
-#include <tb_policy.h>
 #include <mle.h>
-#include <tpm.h>
 #include <loader.h>
 #include <tboot.h>
 #include <integrity.h>
-#include <lcp2.h>
-#include <lcp_hlp.h>
+#include <tpm.h>
+#include <tb_policy.h>
+#include <lcp3.h>
+#include <lcp3_hlp.h>
 #include <cmdline.h>
 #include <txt/config_regs.h>
 #include <txt/mtrrs.h>
@@ -110,6 +110,7 @@ static const tb_policy_map_t g_policy_map[] = {
     { TB_POLTYPE_CONT_VERIFY_FAIL,             TB_POLACT_HALT,
       {
           {TB_ERR_MODULE_VERIFICATION_FAILED,  TB_POLACT_CONTINUE},
+          {TB_ERR_NV_VERIFICATION_FAILED,      TB_POLACT_CONTINUE},
           {TB_ERR_POLICY_NOT_PRESENT,          TB_POLACT_CONTINUE},
           {TB_ERR_POLICY_INVALID,              TB_POLACT_CONTINUE},
           {TB_ERR_NONE,                        TB_POLACT_CONTINUE},
@@ -134,8 +135,9 @@ static uint8_t _policy_index_buf[MAX_POLICY_SIZE];
 static const tb_policy_t _def_policy = {
     version        : 2,
     policy_type    : TB_POLTYPE_CONT_NON_FATAL,
+    hash_alg       : TB_HALG_SHA1,
     policy_control : TB_POLCTL_EXTEND_PCR17,
-    num_entries    : 2,
+    num_entries    : 3,
     entries        : {
         {   /* mod 0 is extended to PCR 18 by default, so don't re-extend it */
             mod_num    : 0,
@@ -148,6 +150,13 @@ static const tb_policy_t _def_policy = {
             pcr        : 19,
             hash_type  : TB_HTYPE_ANY,
             num_hashes : 0
+        },
+        {   /* NV index for geo-tagging will be extended to PCR 22 */
+            mod_num    : TB_POL_MOD_NUM_NV_RAW,
+            pcr        : 22,
+            hash_type  : TB_HTYPE_ANY,
+            nv_index   : 0x40000010,
+            num_hashes : 0
         }
     }
 };
@@ -156,8 +165,9 @@ static const tb_policy_t _def_policy = {
 static const tb_policy_t _def_policy_da = {
     version        : 2,
     policy_type    : TB_POLTYPE_CONT_NON_FATAL,
+    hash_alg       : TB_HALG_SHA1,
     policy_control : TB_POLCTL_EXTEND_PCR17,
-    num_entries    : 2,
+    num_entries    : 3,
     entries        : {
         {   /* mod 0 is extended to PCR 17 by default, so don't re-extend it */
             mod_num    : 0,
@@ -169,6 +179,13 @@ static const tb_policy_t _def_policy_da = {
             mod_num    : TB_POL_MOD_NUM_ANY,
             pcr        : 17,
             hash_type  : TB_HTYPE_ANY,
+            num_hashes : 0
+        },
+        {   /* NV index for geo-tagging will be extended to PCR 22 */
+            mod_num    : TB_POL_MOD_NUM_NV_RAW,
+            pcr        : 22,
+            hash_type  : TB_HTYPE_ANY,
+            nv_index   : 0x40000010,
             num_hashes : 0
         }
     }
@@ -184,8 +201,9 @@ static const tb_policy_t* g_policy = &_def_policy;
  *
  * policy_index_size is in/out
  */
-static bool read_policy_from_tpm(tpm_nv_index_t index,
-                void* policy_index, size_t *policy_index_size)
+static bool 
+read_policy_from_tpm(uint32_t index,
+                     void* policy_index, size_t *policy_index_size)
 {
 #define NV_READ_SEG_SIZE    256
     unsigned int offset = 0;
@@ -197,8 +215,8 @@ static bool read_policy_from_tpm(tpm_nv_index_t index,
         return false;
     }
 
-    ret = tpm_get_nvindex_size(0, index, &index_size);
-    if ( ret != TPM_SUCCESS )
+    ret = g_tpm->get_nvindex_size(g_tpm, 0, index, &index_size);
+    if ( !ret )
         return false;
 
     if ( index_size > *policy_index_size ) {
@@ -215,16 +233,16 @@ static bool read_policy_from_tpm(tpm_nv_index_t index,
             data_size = (uint32_t)(index_size - offset);
 
         /* read! */
-        ret = tpm_nv_read_value(0, index, offset,
-                                (uint8_t *)policy_index + offset, &data_size);
-        if ( ret != TPM_SUCCESS || data_size == 0 )
+        ret = g_tpm->nv_read(g_tpm, 0, index, offset,
+                             (uint8_t *)policy_index + offset, &data_size);
+        if ( !ret || data_size == 0 )
             break;
 
         /* adjust offset */
         offset += data_size;
     } while ( offset < index_size );
 
-    if ( offset == 0 && ret != TPM_SUCCESS ) {
+    if ( offset == 0 && !ret ) {
         printk(TBOOT_ERR"Error: read TPM error: 0x%x from index %x.\n", ret, index);
         return false;
     }
@@ -245,6 +263,9 @@ static bool unwrap_lcp_policy(void)
     void* lcp_base;
     uint32_t lcp_size;
 
+    // scaffolding
+    printk(TBOOT_INFO"in unwrap_lcp_policy\n");
+
     if ( txt_is_launched() ) {
         txt_heap_t *txt_heap = get_txt_heap();
         os_sinit_data_t *os_sinit_data = get_os_sinit_data_start(txt_heap);
@@ -253,8 +274,8 @@ static bool unwrap_lcp_policy(void)
         lcp_size = (uint32_t)os_sinit_data->lcp_po_size;
     }
     else {
-        extern multiboot_info_t *g_mbi;
-        if ( !find_lcp_module(g_mbi, &lcp_base, &lcp_size) )
+        extern loader_ctx *g_ldr_ctx;
+        if ( !find_lcp_module(g_ldr_ctx, &lcp_base, &lcp_size) )
             return false;
     }
 
@@ -270,7 +291,8 @@ static bool unwrap_lcp_policy(void)
 
             while ( elt ) {
                 /* check element type */
-                if ( elt->type == LCP_POLELT_TYPE_CUSTOM ) {
+                if ( elt->type == LCP_POLELT_TYPE_CUSTOM || 
+                     elt->type == LCP_POLELT_TYPE_CUSTOM2 ) {
                     lcp_custom_element_t *custom =
                         (lcp_custom_element_t *)&elt->data;
 
@@ -289,7 +311,11 @@ static bool unwrap_lcp_policy(void)
 
                 elt = (void *)elt + elt->size;
             }
-            pollist = (void *)pollist + get_policy_list_size(pollist);
+            if ( pollist->version == LCP_TPM12_POLICY_LIST_VERSION )
+                pollist = (void *)pollist + get_tpm12_policy_list_size(pollist);
+            else if ( pollist->version == LCP_TPM20_POLICY_LIST_VERSION )
+                pollist = (void *)pollist + get_tpm20_policy_list_size(
+                        (lcp_policy_list_t2 *)pollist);
         }
     }
 
@@ -307,7 +333,7 @@ tb_error_t set_policy(void)
     /* try to read tboot policy from TB_POLICY_INDEX in TPM NV */
     size_t policy_index_size = sizeof(_policy_index_buf);
     printk(TBOOT_INFO"reading Verified Launch Policy from TPM NV...\n");
-    if ( read_policy_from_tpm(TB_POLICY_INDEX,
+    if ( read_policy_from_tpm(g_tpm->tb_policy_index,
              _policy_index_buf, &policy_index_size) ) {
         printk(TBOOT_DETA"\t:%lu bytes read\n", policy_index_size);
         if ( verify_policy((tb_policy_t *)_policy_index_buf,
@@ -323,12 +349,21 @@ tb_error_t set_policy(void)
      * type is LCP_POLTYPE_LIST (since we could have been give a policy data
      * file even though the policy was not a LIST */
     printk(TBOOT_INFO"reading Launch Control Policy from TPM NV...\n");
-    if ( read_policy_from_tpm(INDEX_LCP_OWN,
+    if ( read_policy_from_tpm(g_tpm->lcp_own_index,
              _policy_index_buf, &policy_index_size) ) {
         printk(TBOOT_DETA"\t:%lu bytes read\n", policy_index_size);
         /* assume lcp policy has been verified by sinit already */
         lcp_policy_t *pol = (lcp_policy_t *)_policy_index_buf;
-        if ( pol->policy_type == LCP_POLTYPE_LIST && unwrap_lcp_policy() ) {
+        if ( pol->version == LCP_DEFAULT_POLICY_VERSION_2 &&
+             pol->policy_type == LCP_POLTYPE_LIST && unwrap_lcp_policy() ) {
+            if ( verify_policy((tb_policy_t *)_policy_index_buf,
+                     calc_policy_size((tb_policy_t *)_policy_index_buf),
+                     true) )
+                goto policy_found;
+        }
+        lcp_policy_t2 *pol2 = (lcp_policy_t2 *)_policy_index_buf;
+        if ( pol2->version == LCP_DEFAULT_POLICY_VERSION &&
+             pol2->policy_type == LCP_POLTYPE_LIST && unwrap_lcp_policy() ) {
             if ( verify_policy((tb_policy_t *)_policy_index_buf,
                      calc_policy_size((tb_policy_t *)_policy_index_buf),
                      true) )
@@ -349,12 +384,18 @@ tb_error_t set_policy(void)
         return TB_ERR_POLICY_NOT_PRESENT;
 
 policy_found:
+    /* compatible with tb_policy tools for TPM 1.2 */
+    {
+        tb_policy_t *tmp_policy = (tb_policy_t *)_policy_index_buf;
+        if (tmp_policy->hash_alg == 0)
+            tmp_policy->hash_alg = TB_HALG_SHA1;
+    }
     g_policy = (tb_policy_t *)_policy_index_buf;
     return TB_ERR_NONE;
 }
 
 /* hash current policy */
-bool hash_policy(tb_hash_t *hash, uint8_t hash_alg)
+bool hash_policy(tb_hash_t *hash, uint16_t hash_alg)
 {
     if ( hash == NULL ) {
         printk(TBOOT_ERR"Error: input parameter is wrong.\n");
@@ -366,11 +407,11 @@ bool hash_policy(tb_hash_t *hash, uint8_t hash_alg)
 }
 
 /* generate hash by hashing cmdline and module image */
-static bool hash_module(tb_hash_t *hash, uint8_t hash_alg,
+static bool hash_module(hash_list_t *hl,
                         const char* cmdline, void *base,
                         size_t size)
 {
-    if ( hash == NULL ) {
+    if ( hl == NULL ) {
         printk(TBOOT_ERR"Error: input parameter is wrong.\n");
         return false;
     }
@@ -385,22 +426,85 @@ static bool hash_module(tb_hash_t *hash, uint8_t hash_alg,
         cmdline = "";
     else
         cmdline = skip_filename(cmdline);
-    if ( !hash_buffer((const unsigned char *)cmdline, strlen(cmdline), hash,
-                      hash_alg) )
-        return false;
 
-    /* hash image and extend into cmdline hash */
-    tb_hash_t img_hash;
-    if ( !hash_buffer(base, size, &img_hash, hash_alg) )
+    switch (g_tpm->extpol) {
+    case TB_EXTPOL_FIXED: 
+        hl->count = 1;
+        hl->entries[0].alg = g_tpm->cur_alg;
+
+        if ( !hash_buffer((const unsigned char *)cmdline, strlen(cmdline),
+                    &hl->entries[0].hash, g_tpm->cur_alg) )
+            return false;
+        /* hash image and extend into cmdline hash */
+        tb_hash_t img_hash;
+        if ( !hash_buffer(base, size, &img_hash, g_tpm->cur_alg) )
+            return false;
+        if ( !extend_hash(&hl->entries[0].hash, &img_hash, g_tpm->cur_alg) )
+            return false;
+
+        break;
+
+    case TB_EXTPOL_AGILE: 
+    {
+        hash_list_t img_hl;
+        if ( !g_tpm->hash(g_tpm, 2, (const unsigned char *)cmdline,
+                strlen(cmdline), hl) ) {
+            if ( !g_tpm->hash(g_tpm, 2, base, size, hl) )
+                return false;
+            return true;
+        }
+
+        uint8_t buf[128];
+
+        if ( !g_tpm->hash(g_tpm, 2, base, size, &img_hl) )
+            return false;
+        for (unsigned int i=0; i<hl->count; i++) {
+            for (unsigned int j=0; j<img_hl.count; j++) {
+                if (hl->entries[i].alg == img_hl.entries[j].alg) {
+                    copy_hash((tb_hash_t *)buf, &hl->entries[i].hash,
+                            hl->entries[i].alg);
+                    copy_hash((tb_hash_t *)buf + get_hash_size(hl->entries[i].alg),
+                            &img_hl.entries[j].hash, hl->entries[i].alg);
+                    if ( !g_tpm->hash(g_tpm, 2, buf,
+                            2*get_hash_size(hl->entries[i].alg), hl) )
+                        return false;
+                    
+                    break;
+                }
+            }
+        }
+
+        break;
+    }
+
+    case TB_EXTPOL_EMBEDDED: 
+    {
+        tb_hash_t img_hash;
+        hl->count = g_tpm->alg_count;
+        for (unsigned int i=0; i<hl->count; i++) {
+            hl->entries[i].alg = g_tpm->algs[i];
+            if ( !hash_buffer((const unsigned char *)cmdline, strlen(cmdline),
+                        &hl->entries[i].hash, g_tpm->algs[i]) )
+                return false;
+
+            if ( !hash_buffer(base, size, &img_hash, g_tpm->algs[i]) )
+                return false;
+            if ( !extend_hash(&hl->entries[i].hash, &img_hash, g_tpm->algs[i]) )
+                return false;
+        }
+
+        break;
+    }
+
+    default:
         return false;
-    if ( !extend_hash(hash, &img_hash, hash_alg) )
-        return false;
+    }
 
     return true;
 }
 
 static bool is_hash_in_policy_entry(const tb_policy_entry_t *pol_entry,
-                                    tb_hash_t *hash, uint8_t hash_alg)
+                                    tb_hash_t *hash, uint16_t hash_alg)
 {
     /* assumes policy entry has been validated */
 
@@ -423,9 +527,7 @@ static bool is_hash_in_policy_entry(const tb_policy_entry_t *pol_entry,
 }
 
 /*
- *
  * map policy type + error -> action
- *
  */
 static tb_policy_action_t evaluate_error(tb_error_t error)
 {
@@ -498,13 +600,13 @@ void apply_policy(tb_error_t error)
  * to PCR 18
  */
 static tb_error_t verify_module(module_t *module, tb_policy_entry_t *pol_entry,
-                                uint8_t hash_alg)
+                                uint16_t hash_alg)
 {
     /* assumes module is valid */
 
     void *base = (void *)module->mod_start;
     size_t size = module->mod_end - module->mod_start;
-    char *cmdline = (char *)module->string;
+    char *cmdline = get_module_cmd(g_ldr_ctx, module);
 
     if ( pol_entry != NULL ) {
         /* chunk the command line into 80 byte chunks */
@@ -523,8 +625,8 @@ static tb_error_t verify_module(module_t *module, tb_policy_entry_t *pol_entry,
         printk(TBOOT_INFO"\"...\n");
     }
 
-    tb_hash_t hash;
-    if ( !hash_module(&hash, TB_HALG_SHA1, cmdline, base, size) ) {
+    hash_list_t hl;
+    if ( !hash_module(&hl, cmdline, base, size) ) {
         printk(TBOOT_ERR"\t hash cannot be generated.\n");
         return TB_ERR_MODULE_VERIFICATION_FAILED;
     }
@@ -539,24 +641,29 @@ static tb_error_t verify_module(module_t *module, tb_policy_entry_t *pol_entry,
         uint8_t pcr = (pol_entry == NULL ) ?
                           (g_using_da ? 17 : 18) : pol_entry->pcr;
         VL_ENTRIES(NUM_VL_ENTRIES).pcr = pcr;
-        VL_ENTRIES(NUM_VL_ENTRIES++).hash = hash;
+        VL_ENTRIES(NUM_VL_ENTRIES++).hl = hl;
     }
 
+    if ( g_tpm->extpol != TB_EXTPOL_FIXED )
+        return TB_ERR_NONE;
+
     if ( pol_entry != NULL &&
-         !is_hash_in_policy_entry(pol_entry, &hash, hash_alg) ) {
+         !is_hash_in_policy_entry(pol_entry, &hl.entries[0].hash, hash_alg) ) {
         printk(TBOOT_ERR"\t verification failed\n");
         return TB_ERR_MODULE_VERIFICATION_FAILED;
     }
 
     if ( pol_entry != NULL ) {
-        printk(TBOOT_DETA"\t OK : "); print_hash(&hash, TB_HALG_SHA1);
+        printk(TBOOT_DETA"\t OK : "); print_hash(&hl.entries[0].hash, hash_alg);
     }
+
     return TB_ERR_NONE;
 }
 
-void verify_all_modules(multiboot_info_t *mbi)
+static void verify_g_policy(void)
 {
     /* assumes mbi is valid */
+    printk(TBOOT_INFO"verifying policy \n");
 
     /* add entry for policy control field and (optionally) policy */
     /* hash will be <policy control field (4bytes)> | <hash policy> */
@@ -566,32 +673,69 @@ void verify_all_modules(multiboot_info_t *mbi)
     memcpy(buf, &g_policy->policy_control, sizeof(g_policy->policy_control));
     if ( g_policy->policy_control & TB_POLCTL_EXTEND_PCR17 ) {
         if ( !hash_policy((tb_hash_t *)&buf[sizeof(g_policy->policy_control)],
-                          TB_HALG_SHA1) ) {
+                          g_tpm->cur_alg) ) {
             printk(TBOOT_ERR"policy hash failed\n");
             apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
         }
     }
-    if ( !hash_buffer(buf, get_hash_size(TB_HALG_SHA1) +
-                           sizeof(g_policy->policy_control),
-                      &VL_ENTRIES(NUM_VL_ENTRIES).hash, TB_HALG_SHA1) )
+
+    u32 size = get_hash_size(g_tpm->cur_alg) + sizeof(g_policy->policy_control);
+    switch (g_tpm->extpol) {
+    case TB_EXTPOL_FIXED: 
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.count = 1;
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].alg = g_tpm->cur_alg;
+        if ( !hash_buffer(buf, size,
+                &VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].hash, g_tpm->cur_alg) )
+            apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
+
+        break;
+
+    case TB_EXTPOL_AGILE: 
+        if ( !g_tpm->hash(g_tpm, 2, buf, size, &VL_ENTRIES(NUM_VL_ENTRIES).hl) )
+            apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
+        break;
+
+    case TB_EXTPOL_EMBEDDED: 
+    {
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.count = g_tpm->alg_count;
+        for (int i=0; i<g_tpm->alg_count; i++) {
+            VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[i].alg = g_tpm->algs[i];
+            if ( !hash_buffer(buf, size, &VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[i].hash,
+                        g_tpm->algs[i]) )
+                return;
+        }
+
+        break;
+    }
+
+    default:
         apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
+        break;
+    }
+
     VL_ENTRIES(NUM_VL_ENTRIES++).pcr = 17;
     if ( g_using_da ) {
         /* copying hash of policy_control into PCR 18 */
         if ( NUM_VL_ENTRIES >= MAX_VL_HASHES )
             printk(TBOOT_ERR"\t too many hashes to save for DA\n");
         else {
-            VL_ENTRIES(NUM_VL_ENTRIES).hash = VL_ENTRIES(NUM_VL_ENTRIES-1).hash;
+            VL_ENTRIES(NUM_VL_ENTRIES).hl = VL_ENTRIES(NUM_VL_ENTRIES-1).hl;
             VL_ENTRIES(NUM_VL_ENTRIES++).pcr = 18;
         }
     }
+} 
+
+void verify_all_modules(loader_ctx *lctx)
+{
+    /* assumes mbi is valid */
+    verify_g_policy();
 
     /* module 0 is always extended to PCR 18, so add entry for it */
-    apply_policy(verify_module(get_module(mbi, 0), NULL, g_policy->hash_alg));
+    apply_policy(verify_module(get_module(lctx, 0), NULL, g_policy->hash_alg));
 
     /* now verify each module and add its hash */
-    for ( unsigned int i = 0; i < mbi->mods_count; i++ ) {
-        module_t *module = get_module(mbi, i);
+    for ( unsigned int i = 0; i < get_module_count(lctx); i++ ) {
+        module_t *module = get_module(lctx, i);
         tb_policy_entry_t *pol_entry = find_policy_entry(g_policy, i);
         if ( module == NULL ) {
             printk(TBOOT_ERR"missing module entry %u\n", i);
@@ -608,6 +752,134 @@ void verify_all_modules(multiboot_info_t *mbi)
     printk(TBOOT_INFO"all modules are verified\n");
 }
 
+static int find_first_nvpolicy_entry(const tb_policy_t *policy)
+{
+    if ( policy == NULL ) {
+        PRINT(TBOOT_ERR"Error: policy pointer is NULL\n");
+        return -1;
+    }
+
+    for ( int i = 0; i < policy->num_entries; i++ ) {
+        tb_policy_entry_t *pol_entry = get_policy_entry(policy, i);
+        if ( pol_entry == NULL )
+            return -1;
+
+        if ( pol_entry->mod_num == TB_POL_MOD_NUM_NV ||
+             pol_entry->mod_num == TB_POL_MOD_NUM_NV_RAW )
+            return i;
+    }
+
+    return -1;
+}
+
+static int find_next_nvpolicy_entry(const tb_policy_t *policy, int i)
+{
+    if ( policy == NULL || i < 0 || i >= policy->num_entries )
+        return -1;
+
+    for ( i++; i < policy->num_entries; i++ ) {
+        tb_policy_entry_t *pol_entry = get_policy_entry(policy, i);
+        if ( pol_entry == NULL )
+            return -1;
+
+        if ( pol_entry->mod_num == TB_POL_MOD_NUM_NV ||
+             pol_entry->mod_num == TB_POL_MOD_NUM_NV_RAW )
+            return i;
+    }
+
+    return -1;
+}
+
+static uint8_t nv_buf[4096];
+
+static tb_error_t verify_nvindex(tb_policy_entry_t *pol_entry,
+                                 uint16_t hash_alg)
+{
+    size_t nv_size = sizeof(nv_buf);
+    tb_hash_t digest;
+    uint32_t attribute;
+
+    if ( pol_entry == NULL )
+        return TB_ERR_NV_VERIFICATION_FAILED;
+
+    printk(TBOOT_INFO"verifying nv index 0x%08X\n", pol_entry->nv_index);
+
+    /* check nv attribute */
+    if ( !g_tpm->get_nvindex_permission(g_tpm, 0, pol_entry->nv_index,
+                                                   &attribute) ) {
+        printk(TBOOT_ERR"\t :reading nv index permission failed\n");
+        return TB_ERR_NV_VERIFICATION_FAILED;
+    }
+    if ( !(attribute & (TPM_NV_PER_OWNERWRITE | TPM_NV_PER_AUTHWRITE)) ) {
+        printk(TBOOT_ERR"\t :nv index should be OWNERWRITE or AUTHWRITE, bad permission!\n");
+        return TB_ERR_NV_VERIFICATION_FAILED;
+    }
+
+    /* get nv content */
+    memset(nv_buf, 0, sizeof(nv_buf));
+    if ( !read_policy_from_tpm(pol_entry->nv_index,
+                nv_buf, &nv_size) ) {
+        printk(TBOOT_ERR"\t :reading nv index 0x%08X failed\n",
+               pol_entry->nv_index);
+        return TB_ERR_NV_VERIFICATION_FAILED;
+    }
+
+    /* hash the buffer if needed */
+    switch ( pol_entry->mod_num ) {
+    case TB_POL_MOD_NUM_NV:
+        if ( !hash_buffer((const uint8_t*)nv_buf, nv_size, &digest,
+                          TB_HALG_SHA1) ) {
+            printk(TBOOT_ERR"\t :nv content hash failed\n");
+            return TB_ERR_NV_VERIFICATION_FAILED;
+        }
+        break;
+    case TB_POL_MOD_NUM_NV_RAW:
+        if ( nv_size != sizeof(digest.sha1) ) {
+            printk(TBOOT_ERR"\t :raw nv with wrong size (%d), should be %d\n",
+                   (int)nv_size, sizeof(digest.sha1));
+            return TB_ERR_NV_VERIFICATION_FAILED;
+        }
+        memcpy(digest.sha1, nv_buf, nv_size);
+        break;
+    default:
+        printk(TBOOT_ERR"\t :bad mod number for NV measuring in policy entry: %d\n",
+               pol_entry->mod_num);
+        return TB_ERR_NV_VERIFICATION_FAILED;
+    }
+
+    /* add new hash to list (unless it doesn't get put in a PCR)
+       we'll just drop it if the list is full, but that will mean S3 resume
+       PCRs won't match pre-S3 */
+    if ( NUM_VL_ENTRIES >= MAX_VL_HASHES )
+        printk(TBOOT_WARN"\t too many hashes to save\n");
+    else if ( pol_entry->pcr != TB_POL_PCR_NONE ) {
+        VL_ENTRIES(NUM_VL_ENTRIES).pcr = pol_entry->pcr;
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.count = 1;
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].alg = TB_HALG_SHA1;
+        memcpy(VL_ENTRIES(NUM_VL_ENTRIES++).hl.entries[0].hash.sha1,
+                digest.sha1, SHA1_LENGTH);
+    }
+
+    /* verify nv content */
+    if ( !is_hash_in_policy_entry(pol_entry, &digest, hash_alg) ) {
+        printk(TBOOT_ERR"\t verification failed\n");
+        return TB_ERR_NV_VERIFICATION_FAILED;
+    }
+
+    printk(TBOOT_DETA"\t OK : "); print_hash(&digest, hash_alg);
+    return TB_ERR_NONE;
+}
+
+void verify_all_nvindices(void)
+{
+    /* go through nv policies in tb policy */
+    for ( int i = find_first_nvpolicy_entry(g_policy);
+          i >= 0;
+          i = find_next_nvpolicy_entry(g_policy, i) ) {
+        tb_policy_entry_t *pol_entry = get_policy_entry(g_policy, i);
+        apply_policy(verify_nvindex(pol_entry, g_policy->hash_alg));
+    }
+}
 
 /*
  * Local variables:

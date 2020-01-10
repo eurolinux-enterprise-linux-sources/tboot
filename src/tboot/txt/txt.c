@@ -38,7 +38,6 @@
 #include <stdbool.h>
 #include <types.h>
 #include <tb_error.h>
-#include <multiboot.h>
 #include <msr.h>
 #include <compiler.h>
 #include <string.h>
@@ -49,14 +48,14 @@
 #include <atomic.h>
 #include <mutex.h>
 #include <tpm.h>
-#include <e820.h>
 #include <uuid.h>
 #include <loader.h>
+#include <e820.h>
 #include <tboot.h>
 #include <mle.h>
 #include <hash.h>
-#include <lcp2.h>
 #include <cmdline.h>
+#include <acpi.h>
 #include <txt/txt.h>
 #include <txt/config_regs.h>
 #include <txt/mtrrs.h>
@@ -87,6 +86,7 @@ extern tboot_shared_t _tboot_shared;
 extern void apply_policy(tb_error_t error);
 extern void cpu_wakeup(uint32_t cpuid, uint32_t sipi_vec);
 extern void print_event(const tpm12_pcr_event_t *evt);
+extern void print_event_2(void *evt, uint16_t alg);
 
 /*
  * this is the structure whose addr we'll put in TXT heap
@@ -150,7 +150,8 @@ static void print_mle_hdr(const mle_hdr_t *mle_hdr)
 /* 1 ptable = 3 pages and just 1 loop loop for ptable MLE page table */
 /* can only contain 4k pages */
 
-static __mlept uint8_t g_mle_pt[3 * PAGE_SIZE];  /* pgdir ptr + pgdir + ptab = 3 */
+static __mlept uint8_t g_mle_pt[3 * PAGE_SIZE];  
+/* pgdir ptr + pgdir + ptab = 3 */
 
 static void *build_mle_pagetable(uint32_t mle_start, uint32_t mle_size)
 {
@@ -159,8 +160,8 @@ static void *build_mle_pagetable(uint32_t mle_start, uint32_t mle_size)
     void *pg_dir_ptr_tab, *pg_dir, *pg_tab;
     uint64_t *pte;
 
-    printk(TBOOT_DETA"MLE start=%x, end=%x, size=%x\n", mle_start, mle_start+mle_size,
-           mle_size);
+    printk(TBOOT_DETA"MLE start=%x, end=%x, size=%x\n", 
+           mle_start, mle_start+mle_size, mle_size);
     if ( mle_size > 512*PAGE_SIZE ) {
         printk(TBOOT_ERR"MLE size too big for single page table\n");
         return NULL;
@@ -201,122 +202,9 @@ static void *build_mle_pagetable(uint32_t mle_start, uint32_t mle_size)
     return ptab_base;
 }
 
-/*
- * will go through all modules to find an RACM that matches the platform
- * (size can be NULL)
- */
-static bool find_platform_racm(const multiboot_info_t *mbi, void **base,
-                               uint32_t *size)
-{
-    if ( base != NULL )
-        *base = NULL;
-    if ( size != NULL )
-        *size = 0;
-
-    if ( mbi->mods_addr == 0 || mbi->mods_count == 0 ) {
-        printk(TBOOT_ERR"no module info\n");
-        return false;
-    }
-
-    for ( int i = mbi->mods_count - 1; i >= 0; i-- ) {
-        module_t *m = get_module(mbi, i);
-
-        printk(TBOOT_DETA"checking if module %s is an RACM for this platform...\n",
-               (const char *)m->string);
-        void *base2 = (void *)m->mod_start;
-        uint32_t size2 = m->mod_end - (unsigned long)(base2);
-        if ( is_racm_acmod(base2, size2, false) &&
-             does_acmod_match_platform((acm_hdr_t *)base2) ) {
-            if ( base != NULL )
-                *base = base2;
-            if ( size != NULL )
-                *size = size2;
-            printk(TBOOT_DETA"RACM matches platform\n");
-            return true;
-        }
-    }
-    /* no RACM found for this platform */
-    printk(TBOOT_ERR"no RACM found\n");
-    return false;
-}
-
-/*
- * will go through all modules to find an SINIT that matches the platform
- * (size can be NULL)
- */
-static bool find_platform_sinit_module(const multiboot_info_t *mbi, void **base,
-                                       uint32_t *size)
-{
-    if ( base != NULL )
-        *base = NULL;
-    if ( size != NULL )
-        *size = 0;
-
-    if ( mbi->mods_addr == 0 || mbi->mods_count == 0 ) {
-        printk(TBOOT_ERR"no module info\n");
-        return false;
-    }
-
-    for ( unsigned int i = mbi->mods_count - 1; i > 0; i-- ) {
-        module_t *m = get_module(mbi, i);
-
-        printk(TBOOT_DETA"checking if module %s is an SINIT for this platform...\n",
-               (const char *)m->string);
-        void *base2 = (void *)m->mod_start;
-        uint32_t size2 = m->mod_end - (unsigned long)(base2);
-        if ( is_sinit_acmod(base2, size2, false) &&
-             does_acmod_match_platform((acm_hdr_t *)base2) ) {
-            if ( base != NULL )
-                *base = base2;
-            if ( size != NULL )
-                *size = size2;
-            printk(TBOOT_DETA"SINIT matches platform\n");
-            return true;
-        }
-    }
-    /* no SINIT found for this platform */
-    printk(TBOOT_ERR"no SINIT AC module found\n");
-    return false;
-}
-
-bool find_lcp_module(const multiboot_info_t *mbi, void **base, uint32_t *size)
-{
-    size_t size2 = 0;
-    void *base2 = NULL;
-
-    if ( base != NULL )
-        *base = NULL;
-    if ( size != NULL )
-        *size = 0;
-
-    /* try policy data file for old version (0x00 or 0x01) */
-    find_module_by_uuid(mbi, &base2, &size2, &((uuid_t)LCP_POLICY_DATA_UUID));
-
-    /* not found */
-    if ( base2 == NULL ) {
-        /* try policy data file for new version (0x0202) */
-        find_module_by_file_signature(mbi, &base2, &size2,
-                                      LCP_POLICY_DATA_FILE_SIGNATURE);
-
-        if ( base2 == NULL ) {
-            printk(TBOOT_WARN"no LCP module found\n");
-            return false;
-        }
-        else
-            printk(TBOOT_INFO"v2 LCP policy data found\n");
-    }
-    else
-        printk(TBOOT_INFO"v1 LCP policy data found\n");
-
-
-    if ( base != NULL )
-        *base = base2;
-    if ( size != NULL )
-        *size = size2;
-    return true;
-}
 
 static __data event_log_container_t *g_elog = NULL;
+static __data heap_event_log_ptr_elt2_t *g_elog_2 = NULL;
 
 /* should be called after os_mle_data initialized */
 static void *init_event_log(void)
@@ -337,22 +225,96 @@ static void *init_event_log(void)
     return (void *)g_elog;
 }
 
+static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
+{
+    unsigned int i;
+    os_mle_data_t *os_mle_data = get_os_mle_data_start(get_txt_heap());
+
+    switch (g_tpm->extpol) {
+    case TB_EXTPOL_AGILE:
+        for (i=0; i<evt_log->count; i++) {
+            evt_log->event_log_descr[i].alg = g_tpm->algs_banks[i];
+            evt_log->event_log_descr[i].phys_addr =
+                    (uint64_t)(unsigned long)(os_mle_data->event_log_buffer + i*4096);
+            evt_log->event_log_descr[i].size = 4096;
+            evt_log->event_log_descr[i].pcr_events_offset = 0;
+            evt_log->event_log_descr[i].next_event_offset = 0;
+            if (g_tpm->algs_banks[i] != TB_HALG_SHA1) {
+                evt_log->event_log_descr[i].pcr_events_offset =
+                        32 + sizeof(tpm20_log_descr_t);
+                evt_log->event_log_descr[i].next_event_offset =
+                        32 + sizeof(tpm20_log_descr_t);
+            }
+        }
+        break;
+    case TB_EXTPOL_EMBEDDED:
+        for (i=0; i<evt_log->count; i++) {
+            evt_log->event_log_descr[i].alg = g_tpm->algs[i];
+            evt_log->event_log_descr[i].phys_addr =
+                    (uint64_t)(unsigned long)(os_mle_data->event_log_buffer + i*4096);
+            evt_log->event_log_descr[i].size = 4096;
+            evt_log->event_log_descr[i].pcr_events_offset = 0;
+            evt_log->event_log_descr[i].next_event_offset = 0;
+            if (g_tpm->algs[i] != TB_HALG_SHA1) {
+                evt_log->event_log_descr[i].pcr_events_offset =
+                        32 + sizeof(tpm20_log_descr_t);
+                evt_log->event_log_descr[i].next_event_offset =
+                        32 + sizeof(tpm20_log_descr_t);
+            }
+        }
+        break;
+    case TB_EXTPOL_FIXED:
+        evt_log->event_log_descr[0].alg = g_tpm->cur_alg;
+        evt_log->event_log_descr[0].phys_addr =
+                    (uint64_t)(unsigned long)os_mle_data->event_log_buffer;
+        evt_log->event_log_descr[0].size = 4096;
+        evt_log->event_log_descr[0].pcr_events_offset = 0;
+        evt_log->event_log_descr[0].next_event_offset = 0;
+        if (g_tpm->cur_alg != TB_HALG_SHA1) {
+            evt_log->event_log_descr[0].pcr_events_offset =
+                    32 + sizeof(tpm20_log_descr_t);
+            evt_log->event_log_descr[0].next_event_offset =
+                    32 + sizeof(tpm20_log_descr_t);
+        }
+        break;
+    default:
+        return;
+    }
+}
+
 static void init_os_sinit_ext_data(heap_ext_data_element_t* elts)
 {
     heap_ext_data_element_t* elt = elts;
     heap_event_log_ptr_elt_t *evt_log;
 
-    evt_log = (heap_event_log_ptr_elt_t *)elt->data;
-    evt_log->event_log_phys_addr = (uint64_t)(unsigned long)init_event_log();
-    elt->type = HEAP_EXTDATA_TYPE_TPM_EVENT_LOG_PTR;
-    elt->size = sizeof(*elt) + sizeof(*evt_log);
+    if ( g_tpm->major == TPM12_VER_MAJOR ) {
+        evt_log = (heap_event_log_ptr_elt_t *)elt->data;
+        evt_log->event_log_phys_addr = (uint64_t)(unsigned long)init_event_log();
+        elt->type = HEAP_EXTDATA_TYPE_TPM_EVENT_LOG_PTR;
+        elt->size = sizeof(*elt) + sizeof(*evt_log);
+    } else if ( g_tpm->major == TPM20_VER_MAJOR ) {
+        g_elog_2 = (heap_event_log_ptr_elt2_t *)elt->data;
+
+        if ( g_tpm->extpol == TB_EXTPOL_AGILE )
+            g_elog_2->count = g_tpm->banks;
+        else if ( g_tpm->extpol == TB_EXTPOL_EMBEDDED )
+            g_elog_2->count = g_tpm->alg_count;
+        else
+            g_elog_2->count = 1;
+
+        init_evtlog_desc(g_elog_2);
+
+        elt->type = HEAP_EXTDATA_TYPE_TPM_EVENT_LOG_PTR_2;
+        elt->size = sizeof(*elt) + sizeof(u32) +
+                g_elog_2->count * sizeof(heap_event_log_descr_t);
+    }
 
     elt = (void *)elt + elt->size;
     elt->type = HEAP_EXTDATA_TYPE_END;
     elt->size = sizeof(*elt);
 }
 
-bool evtlog_append(uint8_t pcr, tb_hash_t *hash, uint32_t type)
+bool evtlog_append_tpm12(uint8_t pcr, tb_hash_t *hash, uint32_t type)
 {
     if ( g_elog == NULL )
         return true;
@@ -365,7 +327,7 @@ bool evtlog_append(uint8_t pcr, tb_hash_t *hash, uint32_t type)
 
     next->pcr_index = pcr;
     next->type = type;
-    memcpy(next->digest, hash, sizeof(*hash));
+    memcpy(next->digest, hash, sizeof(next->digest));
     next->data_size = 0;
 
     g_elog->next_event_offset += sizeof(*next) + next->data_size;
@@ -374,13 +336,101 @@ bool evtlog_append(uint8_t pcr, tb_hash_t *hash, uint32_t type)
     return true;
 }
 
+void dump_event_2(void)
+{
+    heap_event_log_descr_t *log_descr;
+
+    for ( unsigned int i=0; i<g_elog_2->count; i++ ) {
+        log_descr = &g_elog_2->event_log_descr[i];
+        printk(TBOOT_DETA"\t\t\t Log Descrption:\n");
+        printk(TBOOT_DETA"\t\t\t             Alg: %u\n", log_descr->alg);
+        printk(TBOOT_DETA"\t\t\t            Size: %u\n", log_descr->size);
+        printk(TBOOT_DETA"\t\t\t    EventsOffset: [%u,%u)\n",
+                log_descr->pcr_events_offset,
+                log_descr->next_event_offset);
+
+        uint32_t hash_size, data_size; 
+        hash_size = get_hash_size(log_descr->alg); 
+        if ( hash_size == 0 )
+            return;
+
+        void *curr, *next;
+        *((u64 *)(&curr)) = log_descr->phys_addr +
+                log_descr->pcr_events_offset;
+        *((u64 *)(&next)) = log_descr->phys_addr +
+                log_descr->next_event_offset;
+
+        while ( curr < next ) {
+            print_event_2(curr, log_descr->alg);
+            data_size = *(uint32_t *)(curr + 2*sizeof(uint32_t) + hash_size);
+            curr += 3*sizeof(uint32_t) + hash_size + data_size;
+        }
+    }
+}
+
+bool evtlog_append_tpm20(uint8_t pcr, uint16_t alg, tb_hash_t *hash, uint32_t type)
+{
+    heap_event_log_descr_t *cur_desc = NULL;
+    uint32_t hash_size; 
+    void *cur, *next;
+
+    for ( unsigned int i=0; i<g_elog_2->count; i++ ) {
+        if ( g_elog_2->event_log_descr[i].alg == alg ) {
+            cur_desc = &g_elog_2->event_log_descr[i];
+            break;
+        }
+    }
+    if ( !cur_desc )
+        return false;
+
+    hash_size = get_hash_size(alg); 
+    if ( hash_size == 0 )
+        return false;
+
+    if ( cur_desc->next_event_offset + 32 > cur_desc->size )
+        return false;
+
+    cur = next = (void *)(unsigned long)cur_desc->phys_addr +
+                     cur_desc->next_event_offset;
+    *((u32 *)next) = pcr;
+    next += sizeof(u32);
+    *((u32 *)next) = type;
+    next += sizeof(u32);
+    memcpy((uint8_t *)next, hash, hash_size);
+    next += hash_size/sizeof(uint32_t);
+    *((u32 *)next) = 0;
+    cur_desc->next_event_offset += 3*sizeof(uint32_t) + hash_size; 
+
+    print_event_2(cur, alg);
+    return true;
+}
+
+bool evtlog_append(uint8_t pcr, hash_list_t *hl, uint32_t type)
+{
+    switch (g_tpm->major) {
+    case TPM12_VER_MAJOR:
+        evtlog_append_tpm12(pcr, &hl->entries[0].hash, type);
+        break;
+    case TPM20_VER_MAJOR:
+        for (unsigned int i=0; i<hl->count; i++)
+            evtlog_append_tpm20(pcr, hl->entries[i].alg,
+                    &hl->entries[i].hash, type);
+        break;
+    default:
+        return false;
+    }
+
+    return true;
+}
+
 __data uint32_t g_using_da = 0;
+__data acm_hdr_t *g_sinit = 0;
 
 /*
  * sets up TXT heap
  */
 static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
-                                 const multiboot_info_t *mbi)
+                                 loader_ctx *lctx)
 {
     txt_heap_t *txt_heap;
     uint64_t *size;
@@ -401,7 +451,7 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
     *size = sizeof(*os_mle_data) + sizeof(uint64_t);
     memset(os_mle_data, 0, sizeof(*os_mle_data));
     os_mle_data->version = 3;
-    os_mle_data->mbi = (multiboot_info_t *)(unsigned long)mbi;
+    os_mle_data->lctx_addr = lctx->addr;
     os_mle_data->saved_misc_enable_msr = rdmsr(MSR_IA32_MISC_ENABLE);
 
     /*
@@ -410,7 +460,8 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
     /* check sinit supported os_sinit_data version */
     uint32_t version = get_supported_os_sinit_data_ver(sinit);
     if ( version < MIN_OS_SINIT_DATA_VER ) {
-        printk(TBOOT_ERR"unsupported OS to SINIT data version(%u) in sinit\n", version);
+        printk(TBOOT_ERR"unsupported OS to SINIT data version(%u) in sinit\n",
+               version);
         return NULL;
     }
     if ( version > MAX_OS_SINIT_DATA_VER )
@@ -430,17 +481,21 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
         (uint64_t)(unsigned long)&_mle_start;
     /* VT-d PMRs */
     uint64_t min_lo_ram, max_lo_ram, min_hi_ram, max_hi_ram;
+    
     if ( !get_ram_ranges(&min_lo_ram, &max_lo_ram, &min_hi_ram, &max_hi_ram) )
         return NULL;
+
     set_vtd_pmrs(os_sinit_data, min_lo_ram, max_lo_ram, min_hi_ram,
                  max_hi_ram);
     /* LCP owner policy data */
     void *lcp_base = NULL;
     uint32_t lcp_size = 0;
-    if ( find_lcp_module(mbi, &lcp_base, &lcp_size) && lcp_size > 0 ) {
+
+    if ( find_lcp_module(lctx, &lcp_base, &lcp_size) && lcp_size > 0 ) {
         /* copy to heap */
         if ( lcp_size > sizeof(os_mle_data->lcp_po_data) ) {
-            printk(TBOOT_ERR"LCP owner policy data file is too large (%u)\n", lcp_size);
+            printk(TBOOT_ERR"LCP owner policy data file is too large (%u)\n",
+                   lcp_size);
             return NULL;
         }
         memcpy(os_mle_data->lcp_po_data, lcp_base, lcp_size);
@@ -459,7 +514,8 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
     else if ( sinit_caps.rlp_wake_getsec )
         os_sinit_data->capabilities.rlp_wake_getsec = 1;
     else {     /* should have been detected in verify_acmod() */
-        printk(TBOOT_ERR"SINIT capabilities are icompatible (0x%x)\n", sinit_caps._raw);
+        printk(TBOOT_ERR"SINIT capabilities are incompatible (0x%x)\n", 
+               sinit_caps._raw);
         return NULL;
     }
     /* capabilities : require MLE pagetable in ECX on launch */
@@ -467,7 +523,25 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
      * os_sinit_data->capabilities.ecx_pgtbl = 1;
      */
     os_sinit_data->capabilities.ecx_pgtbl = 0;
-    /* TODO: when tboot supports EFI then set efi_rsdt_ptr */
+    if (is_loader_launch_efi(lctx)){
+        /* we were launched EFI, set efi_rsdt_ptr */
+        struct acpi_rsdp *rsdp = get_rsdp(lctx);
+        if (rsdp != NULL){
+            if (version < 6){
+                /* rsdt */
+                /* NOTE: Winston Wang says this doesn't work for v5 */
+                os_sinit_data->efi_rsdt_ptr = (uint64_t) rsdp->rsdp1.rsdt;
+            } else {
+                /* rsdp */
+                os_sinit_data->efi_rsdt_ptr = (uint64_t)((uint32_t) rsdp);
+            }
+        } else {
+            /* per discussions--if we don't have an ACPI pointer, die */
+            printk(TBOOT_ERR"Failed to find RSDP for EFI launch\n");
+            return NULL;
+        }
+    }
+        
     /* capabilities : choose DA/LG */
     os_sinit_data->capabilities.pcr_map_no_legacy = 1;
     if ( sinit_caps.pcr_map_da && get_tboot_prefer_da() )
@@ -475,15 +549,25 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit,
     else if ( !sinit_caps.pcr_map_no_legacy )
         os_sinit_data->capabilities.pcr_map_no_legacy = 0;
     else if ( sinit_caps.pcr_map_da ) {
-        printk(TBOOT_INFO"DA is the only supported PCR mapping by SINIT, use it\n");
+        printk(TBOOT_INFO
+               "DA is the only supported PCR mapping by SINIT, use it\n");
         os_sinit_data->capabilities.pcr_map_da = 1;
     }
     else {
-        printk(TBOOT_ERR"SINIT capabilities are icompatible (0x%x)\n", sinit_caps._raw);
+        printk(TBOOT_ERR"SINIT capabilities are incompatible (0x%x)\n", 
+               sinit_caps._raw);
         return NULL;
     }
     g_using_da = os_sinit_data->capabilities.pcr_map_da;
-        
+
+    /* PCR mapping selection MUST be zero in TPM2.0 mode
+     * since D/A mapping is the only supported by TPM2.0 */
+    if ( g_tpm->major >= TPM20_VER_MAJOR ) {
+        os_sinit_data->flags = (g_tpm->extpol == TB_EXTPOL_AGILE) ? 0 : 1;
+        os_sinit_data->capabilities.pcr_map_no_legacy = 0;
+        os_sinit_data->capabilities.pcr_map_da = 0;
+        g_using_da = 1;
+    }   
 
     /* Event log initialization */
     if ( os_sinit_data->version >= 6 )
@@ -539,7 +623,8 @@ static void txt_wakeup_cpus(void)
     /* choose wakeup mechanism based on capabilities used */
     if ( os_sinit_data->capabilities.rlp_wake_monitor ) {
         printk(TBOOT_INFO"joining RLPs to MLE with MONITOR wakeup\n");
-        printk(TBOOT_DETA"rlp_wakeup_addr = 0x%x\n", sinit_mle_data->rlp_wakeup_addr);
+        printk(TBOOT_DETA"rlp_wakeup_addr = 0x%x\n", 
+               sinit_mle_data->rlp_wakeup_addr);
         *((uint32_t *)(unsigned long)(sinit_mle_data->rlp_wakeup_addr)) = 0x01;
     }
     else {
@@ -589,9 +674,8 @@ bool txt_is_launched(void)
     return sts.senter_done_sts;
 }
 
-tb_error_t txt_launch_environment(const multiboot_info_t *mbi)
+tb_error_t txt_launch_environment(loader_ctx *lctx)
 {
-    acm_hdr_t *sinit = NULL;
     void *mle_ptab_base;
     os_mle_data_t *os_mle_data;
     txt_heap_t *txt_heap;
@@ -599,14 +683,14 @@ tb_error_t txt_launch_environment(const multiboot_info_t *mbi)
     /*
      * find correct SINIT AC module in modules list
      */
-    find_platform_sinit_module(mbi, (void **)&sinit, NULL);
+    find_platform_sinit_module(lctx, (void **)&g_sinit, NULL);
     /* if it is newer than BIOS-provided version, then copy it to */
     /* BIOS reserved region */
-    sinit = copy_sinit(sinit);
-    if ( sinit == NULL )
+    g_sinit = copy_sinit(g_sinit);
+    if ( g_sinit == NULL )
         return TB_ERR_SINIT_NOT_PRESENT;
     /* do some checks on it */
-    if ( !verify_acmod(sinit) )
+    if ( !verify_acmod(g_sinit) )
         return TB_ERR_ACMOD_VERIFY_FAILED;
 
     /* print some debug info */
@@ -621,7 +705,7 @@ tb_error_t txt_launch_environment(const multiboot_info_t *mbi)
         return TB_ERR_FATAL;
 
     /* initialize TXT heap */
-    txt_heap = init_txt_heap(mle_ptab_base, sinit, mbi);
+    txt_heap = init_txt_heap(mle_ptab_base, g_sinit, lctx);
     if ( txt_heap == NULL )
         return TB_ERR_TXT_NOT_SUPPORTED;
 
@@ -630,56 +714,56 @@ tb_error_t txt_launch_environment(const multiboot_info_t *mbi)
     save_mtrrs(&(os_mle_data->saved_mtrr_state));
 
     /* set MTRRs properly for AC module (SINIT) */
-    if ( !set_mtrrs_for_acmod(sinit) )
+    if ( !set_mtrrs_for_acmod(g_sinit) )
         return TB_ERR_FATAL;
 
     printk(TBOOT_INFO"executing GETSEC[SENTER]...\n");
     /* (optionally) pause before executing GETSEC[SENTER] */
     if ( g_vga_delay > 0 )
         delay(g_vga_delay * 1000);
-    __getsec_senter((uint32_t)sinit, (sinit->size)*4);
+    __getsec_senter((uint32_t)g_sinit, (g_sinit->size)*4);
     printk(TBOOT_INFO"ERROR--we should not get here!\n");
     return TB_ERR_FATAL;
 }
 
 bool txt_s3_launch_environment(void)
 {
-    acm_hdr_t *sinit;
-
     /* initial launch's TXT heap data is still in place and assumed valid */
     /* so don't re-create; this is OK because it was untrusted initially */
     /* and would be untrusted now */
 
     /* initialize event log in os_sinit_data, so that events will not */
     /* repeat when s3 */
-    if ( g_elog )
+    if ( g_tpm->major == TPM12_VER_MAJOR && g_elog )
         g_elog = (event_log_container_t *)init_event_log();
+    else if ( g_tpm->major == TPM20_VER_MAJOR && g_elog_2 )
+        init_evtlog_desc(g_elog_2);
 
     /* get sinit binary loaded */
-    sinit = (acm_hdr_t *)(uint32_t)read_pub_config_reg(TXTCR_SINIT_BASE);
-    if ( sinit == NULL )
+    g_sinit = (acm_hdr_t *)(uint32_t)read_pub_config_reg(TXTCR_SINIT_BASE);
+    if ( g_sinit == NULL )
         return false;
 
     /* set MTRRs properly for AC module (SINIT) */
-    set_mtrrs_for_acmod(sinit);
+    set_mtrrs_for_acmod(g_sinit);
 
     printk(TBOOT_INFO"executing GETSEC[SENTER]...\n");
     /* (optionally) pause before executing GETSEC[SENTER] */
     if ( g_vga_delay > 0 )
         delay(g_vga_delay * 1000);
-    __getsec_senter((uint32_t)sinit, (sinit->size)*4);
+    __getsec_senter((uint32_t)g_sinit, (g_sinit->size)*4);
     printk(TBOOT_ERR"ERROR--we should not get here!\n");
     return false;
 }
 
-tb_error_t txt_launch_racm(const multiboot_info_t *mbi)
+tb_error_t txt_launch_racm(loader_ctx *lctx)
 {
     acm_hdr_t *racm = NULL;
 
     /*
      * find correct revocation AC module in modules list
      */
-    find_platform_racm(mbi, (void **)&racm, NULL);
+    find_platform_racm(lctx, (void **)&racm, NULL);
     /* copy it to a 32KB aligned memory address */
     racm = copy_racm(racm);
     if ( racm == NULL )
@@ -903,6 +987,7 @@ void txt_cpu_wakeup(void)
 {
     txt_heap_t *txt_heap;
     os_mle_data_t *os_mle_data;
+    uint64_t madt_apicbase, msr_apicbase;
     unsigned int cpuid = get_apicid();
 
     if ( cpuid >= NR_CPUS ) {
@@ -914,6 +999,20 @@ void txt_cpu_wakeup(void)
     mtx_enter(&ap_lock);
 
     printk(TBOOT_INFO"cpu %u waking up from TXT sleep\n", cpuid);
+
+    /* restore LAPIC base address for AP */
+    madt_apicbase = (uint64_t)get_madt_apic_base();
+    if ( madt_apicbase == 0 ) {
+        printk(TBOOT_ERR"not able to get apci base from MADT\n");
+        apply_policy(TB_ERR_FATAL);
+        return;
+    }
+    msr_apicbase = rdmsr(MSR_APICBASE);
+    if ( madt_apicbase != (msr_apicbase & ~0xFFFULL) ) {
+        printk(TBOOT_INFO"cpu %u restore apic base to %llx\n",
+               cpuid, madt_apicbase);
+        wrmsr(MSR_APICBASE, (msr_apicbase & 0xFFFULL) | madt_apicbase);
+    }
 
     txt_heap = get_txt_heap();
     os_mle_data = get_os_mle_data_start(txt_heap);
@@ -967,7 +1066,8 @@ tb_error_t txt_protect_mem_regions(void)
     /* TXT private space */
     base = TXT_PRIV_CONFIG_REGS_BASE;
     size = TXT_CONFIG_REGS_SIZE;
-    printk(TBOOT_INFO"protecting TXT Private Space (%Lx - %Lx) in e820 table\n",
+    printk(TBOOT_INFO
+           "protecting TXT Private Space (%Lx - %Lx) in e820 table\n",
            base, (base + size - 1));
     if ( !e820_protect_region(base, size, E820_RESERVED) )
         return TB_ERR_FATAL;
@@ -1015,7 +1115,8 @@ void txt_shutdown(void)
     /* if some APs are still in wait-for-sipi then SEXIT will hang */
     /* so TXT reset the platform instead, expect mwait case */
     if ( (!use_mwait()) && atomic_read(&ap_wfs_count) > 0 ) {
-        printk(TBOOT_INFO"exiting with some APs still in wait-for-sipi state (%u)\n",
+        printk(TBOOT_INFO
+               "exiting with some APs still in wait-for-sipi state (%u)\n",
                atomic_read(&ap_wfs_count));
         write_priv_config_reg(TXTCR_CMD_RESET, 0x01);
     }
@@ -1110,7 +1211,8 @@ bool get_parameters(getsec_parameters_t *params)
             params->preserve_mce = (eax & 0x00000040) ? true : false;
         }
         else {
-            printk(TBOOT_WARN"unknown GETSEC[PARAMETERS] type: %d\n", param_type);
+            printk(TBOOT_WARN"unknown GETSEC[PARAMETERS] type: %d\n", 
+                   param_type);
             param_type = 0;    /* set so that we break out of the loop */
         }
     } while ( param_type != 0 );

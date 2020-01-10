@@ -42,6 +42,13 @@
 #include <misc.h>
 #include <printk.h>
 #include <cmdline.h>
+#include <tpm.h>
+#include <tboot.h>
+#include <mle.h>
+#include <txt/mtrrs.h>
+#include <multiboot.h>
+#include <txt/config_regs.h>
+#include <txt/heap.h>
 
 /*
  * copy of original command line
@@ -75,6 +82,8 @@ static const cmdline_option_t g_tboot_cmdline_options[] = {
     { "pcr_map", "legacy" },         /* legacy|da */
     { "min_ram", "0" },              /* size in bytes | 0 for no min */
     { "call_racm", "false" },        /* true|false|check */
+    { "measure_nv", "false" },       /* true|false */
+    { "extpol",    "sha1" },        /* agile|embedded|sha1|sha256|sm3|... */
     { NULL, NULL }
 };
 static char g_tboot_param_values[ARRAY_SIZE(g_tboot_cmdline_options)][MAX_VALUE_LEN];
@@ -481,6 +490,45 @@ bool get_tboot_call_racm_check(void)
     if ( call_racm == NULL || strcmp(call_racm, "check") != 0 )
         return false;
     return true;
+}
+
+bool get_tboot_measure_nv(void)
+{
+    const char *measure_nv = get_option_val(g_tboot_cmdline_options,
+                                       g_tboot_param_values, "measure_nv");
+    if ( measure_nv == NULL || strcmp(measure_nv, "true") != 0 )
+        return false;
+    return true;
+}
+
+
+void get_tboot_extpol(void)
+{
+    const char *extpol = get_option_val(g_tboot_cmdline_options,
+                                       g_tboot_param_values, "extpol");
+
+    if ( extpol == NULL ) {
+        g_tpm->extpol = TB_EXTPOL_FIXED;
+        g_tpm->cur_alg = TB_HALG_SHA256;
+        return;
+    }
+
+    if ( strcmp(extpol, "agile") == 0 ) {
+        g_tpm->extpol = TB_EXTPOL_AGILE;
+        g_tpm->cur_alg = TB_HALG_SHA256;
+    } else if ( strcmp(extpol, "embedded") == 0 ) {
+        g_tpm->extpol = TB_EXTPOL_EMBEDDED;
+        g_tpm->cur_alg = TB_HALG_SHA256;
+    } else if ( strcmp(extpol, "sha256") == 0 ) {
+        g_tpm->extpol = TB_EXTPOL_FIXED;
+        g_tpm->cur_alg = TB_HALG_SHA256;
+    } else if ( strcmp(extpol, "sha1") == 0 ) {
+        g_tpm->extpol = TB_EXTPOL_FIXED;
+        g_tpm->cur_alg = TB_HALG_SHA1;
+    } else if ( strcmp(extpol, "sm3") == 0 ) {
+        g_tpm->extpol = TB_EXTPOL_FIXED;
+        g_tpm->cur_alg = TB_HALG_SM3;
+    }
 }
 
 /*

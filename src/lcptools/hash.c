@@ -50,12 +50,12 @@
  *
  */
 bool are_hashes_equal(const tb_hash_t *hash1, const tb_hash_t *hash2,
-		      uint8_t hash_alg)
+		      uint16_t hash_alg)
 {
     if ( ( hash1 == NULL ) || ( hash2 == NULL ) )
         return false;
 
-    if ( hash_alg == TB_HALG_SHA1 )
+    if ( hash_alg == TB_HALG_SHA1_LG )
         return (memcmp(hash1, hash2, SHA1_LENGTH) == 0);
     else
         return false;
@@ -68,12 +68,12 @@ bool are_hashes_equal(const tb_hash_t *hash1, const tb_hash_t *hash2,
  *
  */
 bool hash_buffer(const unsigned char* buf, size_t size, tb_hash_t *hash,
-		 uint8_t hash_alg)
+		 uint16_t hash_alg)
 {
     if ( hash == NULL )
         return false;
 
-    if ( hash_alg == TB_HALG_SHA1 ) {
+    if ( hash_alg == TB_HALG_SHA1_LG ) {
         EVP_MD_CTX ctx;
         const EVP_MD *md;
 
@@ -93,14 +93,14 @@ bool hash_buffer(const unsigned char* buf, size_t size, tb_hash_t *hash,
  * perform "extend" of two hashes (i.e. hash1 = SHA(hash1 || hash2)
  *
  */
-bool extend_hash(tb_hash_t *hash1, const tb_hash_t *hash2, uint8_t hash_alg)
+bool extend_hash(tb_hash_t *hash1, const tb_hash_t *hash2, uint16_t hash_alg)
 {
     uint8_t buf[2*sizeof(tb_hash_t)];
 
     if ( hash1 == NULL || hash2 == NULL )
         return false;
 
-    if ( hash_alg == TB_HALG_SHA1 ) {
+    if ( hash_alg == TB_HALG_SHA1_LG ) {
         EVP_MD_CTX ctx;
         const EVP_MD *md;
 
@@ -116,14 +116,19 @@ bool extend_hash(tb_hash_t *hash1, const tb_hash_t *hash2, uint8_t hash_alg)
         return false;
 }
 
-void print_hash(const tb_hash_t *hash, uint8_t hash_alg)
+void print_hash(const tb_hash_t *hash, uint16_t hash_alg)
 {
     if ( hash == NULL )
         return;
 
-    if ( hash_alg == TB_HALG_SHA1 ) {
+    if ( hash_alg == TB_HALG_SHA1_LG ) {
         for ( unsigned int i = 0; i < sizeof(hash->sha1); i++ )
             fprintf(stderr, "%02x ", hash->sha1[i]);
+        fprintf(stderr, "\n");
+    }
+    else if ( hash_alg == TB_HALG_SHA256 ) {
+        for ( unsigned int i = 0; i < sizeof(hash->sha256); i++ )
+            fprintf(stderr, "%02x ", hash->sha256[i]);
         fprintf(stderr, "\n");
     }
     else
@@ -131,12 +136,12 @@ void print_hash(const tb_hash_t *hash, uint8_t hash_alg)
 }
 
 void copy_hash(tb_hash_t *dest_hash, const tb_hash_t *src_hash,
-               uint8_t hash_alg)
+               uint16_t hash_alg)
 {
-    if ( dest_hash == NULL || dest_hash == NULL )
+    if ( dest_hash == NULL || src_hash == NULL )
         return;
 
-    if ( hash_alg == TB_HALG_SHA1 )
+    if ( hash_alg == TB_HALG_SHA1_LG )
         memcpy(dest_hash, src_hash, SHA1_LENGTH);
 }
 

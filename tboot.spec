@@ -1,15 +1,15 @@
 Summary:        Performs a verified launch using Intel TXT
 Name:           tboot
-Version:        1.7.4
+Version:        1.8.1
 Release:        1%{?dist}
 
 Group:          System Environment/Base
 License:        BSD
 URL:            http://sourceforge.net/projects/tboot/
 Source0:        http://downloads.sourceforge.net/%{name}/%{name}-%{version}.tar.gz
-Patch0:         tboot-1.7.3-coverity.patch
-Patch1:         tboot-1.7.3-README.patch
-Patch2:         tboot-1.7.3-cmdline-size.patch
+Patch0:         tboot-%{version}-coverity.patch
+Patch1:         tboot-%{version}-README.patch
+Patch2:         tboot-%{version}-cmdline-size.patch
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 BuildRequires:  trousers-devel
@@ -25,7 +25,7 @@ and verified launch of an OS kernel/VMM.
 %setup -q
 %patch0 -p1 -b .coverity
 %patch1 -p1 -b .README
-%patch2 -p1 -b .cmdline
+%patch2 -b .cmdline
 
 %build
 CFLAGS="$RPM_OPT_FLAGS"; export CFLAGS
@@ -51,9 +51,13 @@ rm -rf $RPM_BUILD_ROOT
 %{_sbindir}/lcp_crtpconf
 %{_sbindir}/lcp_crtpol
 %{_sbindir}/lcp_crtpol2
+%{_sbindir}/lcp2_crtpol
 %{_sbindir}/lcp_crtpolelt
+%{_sbindir}/lcp2_crtpolelt
 %{_sbindir}/lcp_crtpollist
+%{_sbindir}/lcp2_crtpollist
 %{_sbindir}/lcp_mlehash
+%{_sbindir}/lcp2_mlehash
 %{_sbindir}/lcp_readpol
 %{_sbindir}/lcp_writepol
 %{_sbindir}/parse_err
@@ -67,6 +71,12 @@ rm -rf $RPM_BUILD_ROOT
 /boot/tboot-syms
 
 %changelog
+* Wed May 28 2014 Samantha N. Bueno <sbueno@redhat.com> - 1.8.1-1
+- Upgrade to 1.8.1 release
+  Resolves: rhbz#1037469
+- Rebase patches, including one I missed a chunk of last release
+  Resolves: rhbz#1065320
+
 * Thu Jul 25 2013 Samantha N. Bueno <sbueno@redhat.com> - 1.7.4-1
 - Upgrade to 1.7.4 release
   Resolves: rhbz#957158

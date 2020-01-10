@@ -1,5 +1,5 @@
 ******************************************************************************
-* This version of tboot will not work with Xen versions <3.4 (c/s < 19115)   *
+* This version of tboot will not work with Xen versions < 3.4 (c/s < 19115)  *
 ******************************************************************************
 
 Trusted Boot (tboot) is an open source, pre-kernel/VMM module that uses
@@ -221,6 +221,70 @@ o  Tboot provides support to launch Revocation ACM (RACM) to revoke old buggy
    launch with "call_racm=check" right after the warm reset. This tboot launch
    will end with halt right after the RACM launch result was output, and the
    system need manually reset.
+
+o  Tboot support EFI boot via grub2 multiboot2 protocol. 
+
+   In Fedora 18/19, the OS should be installed and booted in EFI mode first,
+   then:
+
+       Under tboot code root folder: make; make install
+
+       Copy appropriate SINIT for platform into /boot.
+
+       Run: grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
+
+       Create directory /boot/efi/EFI/fedora/x86_64-efi, and copy
+       multiboot2.mod and relocator.mod from /usr/lib/grub/x86_64-efi into it.
+
+       Reboot to choose tboot grub option for TXT launch.
+
+   Linux launch works already. Xen for trad BIOS still work and Xen EFI is not
+   going to work until we can get a version with Daniel Kiper's multiboot2
+   changes in it -- and then we'll need to make some trivial changes to the
+   20_xen_tboot file. Grub2 is required for all of this.
+
+o  Tboot support TPM NV measuring via extended Verified Launch Tboot Policy.
+
+   This works only for TPM1.2 by far.
+
+   TPM NV measuring is defaultly disabled, need below cmdline option to enable:
+       measure_nv=true
+
+   When NV measuring is enabled, it will get all NV measuring policy entry from
+   the tboot policy structure. Every NV policy entry will specify:
+       nv_index: TPM NV index to measure and verify
+       pcr:      PCR to be extended with the NV measurement
+       mod_num:  Tell how to measure the nv
+         = TB_POL_MOD_NUM_NV: hash then extend, no size limitation on NV index
+         = TB_POL_MOD_NUM_NV_RAW: extend w/o hash, size should equal hash size
+       hash_type:
+         = any: no verification needed
+         = image: need verify per hashs list.
+       hashs:    hash list. optional.
+
+   There is one default NV policy entry, which will try to read NV 0x40000010
+   and extend it into pcr 22 without hashing.
+
+   The nv_index to be measured must be defined with OWNERWRITE permission,
+   otherwise the verification will fail, and nothing will be extended into pcr.
+
+o  Tboot provides support to TPM2 module, and following command line option is
+   used to select TPM2 extend policy.
+       extpol=agile|embedded|sha1|sha256|sm3|...
+
+   When "agile" policy is selected, ACM will use specific TPM2 commands to compute
+   hashes and extend all existing PCR banks at the expense of possible
+   performance loss.
+
+   For "embedded" policy, ACM will use algorithms supported by tboot to compute
+   hashes and then will use TPM2_PCR_Extend commands to extend them into PCRs.
+   If PCRs utilizing hash algorithms not supported by SW are discovered, they
+   will be capped with "1" value. This policy when selected will ensure maximum
+   possible performance at the expense of possible capping of some of the PCRs.
+
+   Other policy, like "sha1", "sha256", etc., only represent one single algorithm.
+   It means tboot will use this algorithm to compute hash and use TPM2_PCR_Extend
+   to extend it into PCRs.
 
 
 PCR Usage:

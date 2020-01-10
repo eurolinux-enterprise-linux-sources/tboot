@@ -41,7 +41,8 @@
 #include <compiler.h>
 #include <string.h>
 #include <printk.h>
-#include <multiboot.h>
+#include <uuid.h>
+#include <loader.h>
 #include <processor.h>
 #include <misc.h>
 #include <page.h>
@@ -54,6 +55,7 @@
 #include <loader.h>
 #include <hash.h>
 #include <mle.h>
+#include <tpm.h>
 #include <tb_error.h>
 #include <txt/txt.h>
 #include <txt/vmcs.h>
@@ -66,12 +68,12 @@
 #include <tboot.h>
 #include <acpi.h>
 #include <integrity.h>
-#include <tpm.h>
 #include <cmdline.h>
 
 extern void _prot_to_real(uint32_t dist_addr);
 extern bool set_policy(void);
-extern void verify_all_modules(multiboot_info_t *mbi);
+extern void verify_all_modules(loader_ctx *lctx);
+extern void verify_all_nvindices(void);
 extern void apply_policy(tb_error_t error);
 void s3_launch(void);
 
@@ -87,8 +89,10 @@ extern atomic_t ap_wfs_count;
 
 extern struct mutex ap_lock;
 
-/* multiboot struct saved so that post_launch() can use it */
-__data multiboot_info_t *g_mbi = NULL;
+/* loader context struct saved so that post_launch() can use it */
+__data loader_ctx g_loader_ctx = { NULL, 0 };
+__data loader_ctx *g_ldr_ctx = &g_loader_ctx;
+__data uint32_t g_mb_orig_size = 0;
 
 /* MLE/kernel shared data page (in boot.S) */
 extern tboot_shared_t _tboot_shared;
@@ -163,14 +167,14 @@ static void post_launch(void)
         s3_launch();
 
     /* remove all TXT modules before verifying modules */
-    remove_txt_modules(g_mbi);
+    remove_txt_modules(g_ldr_ctx);
 
     /*
      * verify e820 table and adjust it to protect our memory regions
      */
 
     /* ensure all modules are in RAM */
-    if ( !verify_modules(g_mbi) )
+    if ( !verify_modules(g_ldr_ctx) )
         apply_policy(TB_ERR_POST_LAUNCH_VERIFICATION);
 
     /* marked mem regions used by TXT (heap, SINIT, etc.) as E820_RESERVED */
@@ -208,8 +212,8 @@ static void post_launch(void)
             apply_policy(TB_ERR_FATAL);
     }
 
-    /* replace map in mbi with copy */
-    replace_e820_map(g_mbi);
+    /* replace map in loader context with copy */
+    replace_e820_map(g_ldr_ctx);
 
     printk(TBOOT_DETA"adjusted e820 map:\n");
     print_e820_map();
@@ -217,7 +221,13 @@ static void post_launch(void)
     /*
      * verify modules against policy
      */
-    verify_all_modules(g_mbi);
+    verify_all_modules(g_ldr_ctx);
+
+    /*
+     * verify nv indices against policy
+     */
+    if ( (g_tpm->major == TPM12_VER_MAJOR) &&  get_tboot_measure_nv() )
+        verify_all_nvindices();
 
     /*
      * seal hashes of modules and VL policy to current value of PCR17 & 18
@@ -236,7 +246,7 @@ static void post_launch(void)
     _tboot_shared.tboot_base = (uint32_t)&_start;
     _tboot_shared.tboot_size = (uint32_t)&_end - (uint32_t)&_start;
     uint32_t key_size = sizeof(_tboot_shared.s3_key);
-    if ( tpm_get_random(2, _tboot_shared.s3_key, &key_size) != TPM_SUCCESS ||
+    if ( !g_tpm->get_random(g_tpm, 2, _tboot_shared.s3_key, &key_size) ||
          key_size != sizeof(_tboot_shared.s3_key) )
         apply_policy(TB_ERR_S3_INTEGRITY);
     _tboot_shared.num_in_wfs = atomic_read(&ap_wfs_count);
@@ -299,12 +309,12 @@ void launch_racm(void)
     /* Place RLPs in Wait for SIPI state */
     startup_rlps();
 
-    /* Verify mbi */
-    if ( !verify_mbi(g_mbi) )
+    /* Verify loader context */
+    if ( !verify_loader_context(g_ldr_ctx) )
         apply_policy(TB_ERR_FATAL);
     
     /* load racm */
-    err = txt_launch_racm(g_mbi);
+    err = txt_launch_racm(g_ldr_ctx);
     apply_policy(err);
 }
 
@@ -315,22 +325,25 @@ void check_racm_result(void)
     shutdown_system(TB_SHUTDOWN_HALT); 
 }
 
-void begin_launch(multiboot_info_t *mbi)
+void begin_launch(void *addr, uint32_t magic)
 {
     tb_error_t err;
 
-    g_mbi = ( g_mbi == NULL ) ? mbi : g_mbi;  /* save for post launch */
+    if (g_ldr_ctx->type == 0)
+        determine_loader_type(addr, magic);
 
     /* on pre-SENTER boot, copy command line to buffer in tboot image
        (so that it will be measured); buffer must be 0 -filled */
     if ( !is_launched() && !s3_flag ) {
-        memset(g_cmdline, '\0', sizeof(g_cmdline));
-        if ( g_mbi->flags & MBI_CMDLINE ) {
-            /* don't include path in cmd line */
-            const char *cmdline = skip_filename((char *)g_mbi->cmdline);
-            if ( cmdline != NULL )
-                strncpy(g_cmdline, cmdline, sizeof(g_cmdline)-1);
+
+        const char *cmdline_orig = get_cmdline(g_ldr_ctx);
+        const char *cmdline = NULL;
+        if (cmdline_orig){
+            cmdline = skip_filename(cmdline_orig);
         }
+        memset(g_cmdline, '\0', sizeof(g_cmdline));
+        if (cmdline)
+            strncpy(g_cmdline, cmdline, sizeof(g_cmdline)-1);
     }
 
     /* always parse cmdline */
@@ -351,6 +364,11 @@ void begin_launch(multiboot_info_t *mbi)
     if ( s3_flag )
         printk(TBOOT_INFO"resume from S3\n");
 
+    /* RLM scaffolding
+       if (g_ldr_ctx->type == 2)
+       print_loader_ctx(g_ldr_ctx);
+    */
+
     /* clear resume vector on S3 resume so any resets will not use it */
     if ( !is_launched() && s3_flag )
         set_s3_resume_vector(&_tboot_shared.acpi_sinfo, 0);
@@ -364,7 +382,7 @@ void begin_launch(multiboot_info_t *mbi)
 
     /* make copy of e820 map that we will use and adjust */
     if ( !s3_flag ) {
-        if ( !copy_e820_map(g_mbi) )
+        if ( !copy_e820_map(g_ldr_ctx) )
             apply_policy(TB_ERR_FATAL);
     }
 
@@ -373,7 +391,7 @@ void begin_launch(multiboot_info_t *mbi)
     /* has already been launched */
 
     /* make TPM ready for measured launch */
-    if ( !is_tpm_ready(0) )
+    if ( !tpm_detect() )
         apply_policy(TB_ERR_TPM_NOT_READY);
 
     /* read tboot policy from TPM-NV (will use default if none in TPM-NV) */
@@ -397,7 +415,7 @@ void begin_launch(multiboot_info_t *mbi)
     apply_policy(err);
 
     /* ensure there are modules */
-    if ( !s3_flag && !verify_mbi(g_mbi) )
+    if ( !s3_flag && !verify_loader_context(g_ldr_ctx) )
         apply_policy(TB_ERR_FATAL);
 
     /* this is being called post-measured launch */
@@ -410,6 +428,8 @@ void begin_launch(multiboot_info_t *mbi)
 
     /* do s3 launch directly, if is a s3 resume */
     if ( s3_flag ) {
+        if ( !prepare_tpm() )
+            apply_policy(TB_ERR_TPM_NOT_READY);
         txt_s3_launch_environment();
         printk(TBOOT_ERR"we should never get here\n");
         apply_policy(TB_ERR_FATAL);
@@ -426,7 +446,7 @@ void begin_launch(multiboot_info_t *mbi)
         apply_policy(TB_ERR_TPM_NOT_READY);
 
     /* launch the measured environment */
-    err = txt_launch_environment(mbi);
+    err = txt_launch_environment(g_ldr_ctx);
     apply_policy(err);
 }
 
@@ -506,30 +526,6 @@ static void shutdown_system(uint32_t shutdown_type)
     }
 }
 
-static void cap_pcrs(void)
-{
-    bool was_capped[TPM_NR_PCRS] = {false};
-    tpm_pcr_value_t cap_val;   /* use whatever val is on stack */
-
-    /* ensure PCRs 17 + 18 are always capped */
-    tpm_pcr_extend(2, 17, &cap_val, NULL);
-    tpm_pcr_extend(2, 18, &cap_val, NULL);
-    was_capped[17] = was_capped[18] = true;
-
-    /* also cap every dynamic PCR we extended (only once) */
-    /* don't cap static PCRs since then they would be wrong after S3 resume */
-    memset(&was_capped, true, TPM_PCR_RESETABLE_MIN*sizeof(bool));
-    for ( int i = 0; i < g_pre_k_s3_state.num_vl_entries; i++ ) {
-        if ( !was_capped[g_pre_k_s3_state.vl_entries[i].pcr] ) {
-            tpm_pcr_extend(2, g_pre_k_s3_state.vl_entries[i].pcr, &cap_val,
-                           NULL);
-            was_capped[g_pre_k_s3_state.vl_entries[i].pcr] = true;
-        }
-    }
-
-    printk(TBOOT_INFO"cap'ed dynamic PCRs\n");
-}
-
 void shutdown(void)
 {
     /* wait-for-sipi only invoked for APs, so skip all BSP shutdown code */
@@ -577,13 +573,13 @@ void shutdown(void)
     if ( is_launched() ) {
 
         /* cap PCRs to ensure no follow-on code can access sealed data */
-        cap_pcrs();
+        g_tpm->cap_pcrs(g_tpm, 2, -1);
 
         /* have TPM save static PCRs (in case VMM/kernel didn't) */
         /* per TCG spec, TPM can invalidate saved state if any other TPM
            operation is performed afterwards--so do this last */
         if ( _tboot_shared.shutdown_type == TB_SHUTDOWN_S3 )
-            tpm_save_state(2);
+            g_tpm->save_state(g_tpm, 2);
 
         /* scrub any secrets by clearing their memory, then flush cache */
         /* we don't have any secrets to scrub, however */
