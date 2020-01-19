@@ -1,7 +1,7 @@
 Summary:        Performs a verified launch using Intel TXT
 Name:           tboot
-Version:        1.9.4
-Release:        2%{?dist}
+Version:        1.9.5
+Release:        1%{?dist}
 Epoch:          1
 
 Group:          System Environment/Base
@@ -85,6 +85,10 @@ rm -rf $RPM_BUILD_ROOT
 /boot/tboot-syms
 
 %changelog
+* Fri Jan 27 2017 Tony Camuso <tcamuso@redhat.com> - 1:1.9.5-1
+  Rebase to 1.9.5
+  Resolves: rhbz#1384210
+
 * Tue Aug 09 2016 Tony Camuso <tcamuso@redhat.com> - 1:1.9.4-2
 - Test for UEFI system with /sys/firmware/efi, rather than looking in
   the boot directory for an efi directory.

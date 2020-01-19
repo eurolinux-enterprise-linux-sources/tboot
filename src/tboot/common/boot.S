@@ -68,6 +68,7 @@
 .section ".tboot_multiboot_header","w"
         .align 4
 /* multiboot header */
+multiboot_header:
 #define MULTIBOOT_HEADER_FLAGS (MULTIBOOT_HEADER_MODS_ALIGNED | \
                                 MULTIBOOT_HEADER_WANT_MEMORY)
         /* magic number for multiboot header */
@@ -95,7 +96,6 @@ multiboot2_header_end:
 
 ENTRY(start)
 ENTRY(_start)
-ENTRY(_stext)
         jmp __start
 
 

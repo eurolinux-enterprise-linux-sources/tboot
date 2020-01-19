@@ -378,6 +378,10 @@ void begin_launch(void *addr, uint32_t magic)
         if ( !copy_e820_map(g_ldr_ctx) )  apply_policy(TB_ERR_FATAL);
     }
 
+    /* make TPM ready for measured launch */
+    if (!tpm_detect()) 
+       apply_policy(TB_ERR_TPM_NOT_READY);
+   
     /* we need to make sure this is a (TXT-) capable platform before using */
     /* any of the features, incl. those required to check if the environment */
     /* has already been launched */
@@ -390,12 +394,9 @@ void begin_launch(void *addr, uint32_t magic)
            apply_policy(TB_ERR_SINIT_NOT_PRESENT);
        if (!verify_acmod(g_sinit)) 
            apply_policy(TB_ERR_ACMOD_VERIFY_FAILED);
-   }
+    }
 
-    /* make TPM ready for measured launch */
 
-   if (!tpm_detect()) 
-       apply_policy(TB_ERR_TPM_NOT_READY);
 
     /* read tboot verified launch control policy from TPM-NV (will use default if none in TPM-NV) */
     err = set_policy();
@@ -551,14 +552,22 @@ void shutdown(void)
         cpu_relax();
 
     /* ensure localities 0, 1 are inactive (in case kernel used them) */
-   
+    /* request TPM current locality to be active */
     if (g_tpm_family != TPM_IF_20_CRB ) {
-        release_locality(0);
-	 release_locality(1);
+        if (!release_locality(0))
+            printk(TBOOT_ERR"Release TPM FIFO locality 0 failed \n");
+        if (!release_locality(1))
+            printk(TBOOT_ERR"Release TPM FIFO locality 1 failed \n");
+        if (!tpm_wait_cmd_ready(g_tpm->cur_loc))
+            printk(TBOOT_ERR"Request TPM FIFO locality %d failed \n", g_tpm->cur_loc);
     }
     else {
-        tpm_relinquish_locality_crb(0);
-	 tpm_relinquish_locality_crb(1);			 
+        if (!tpm_relinquish_locality_crb(0))
+            printk(TBOOT_ERR"Release TPM CRB locality 0 failed \n");
+        if (!tpm_relinquish_locality_crb(1))			 
+            printk(TBOOT_ERR"Release TPM CRB locality 1 failed \n");
+        if (!tpm_request_locality_crb(g_tpm->cur_loc))
+            printk(TBOOT_ERR"Request TPM CRB locality %d failed \n", g_tpm->cur_loc);
     }
 
     if ( _tboot_shared.shutdown_type == TB_SHUTDOWN_S3 ) {
@@ -567,7 +576,7 @@ void shutdown(void)
 
         /* save kernel/VMM resume vector for sealing */
         g_post_k_s3_state.kernel_s3_resume_vector =  _tboot_shared.acpi_sinfo.kernel_s3_resume_vector;
-
+        
         /* create and seal memory integrity measurement */
         if ( !seal_post_k_state() )   apply_policy(TB_ERR_S3_INTEGRITY);
             /* OK to leave key in memory on failure since if user cared they

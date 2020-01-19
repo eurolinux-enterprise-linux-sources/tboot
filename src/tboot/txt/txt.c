@@ -240,12 +240,6 @@ static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
             evt_log->event_log_descr[i].size = 4096;
             evt_log->event_log_descr[i].pcr_events_offset = 0;
             evt_log->event_log_descr[i].next_event_offset = 0;
-            if (g_tpm->algs_banks[i] != TB_HALG_SHA1) {
-                evt_log->event_log_descr[i].pcr_events_offset =
-                        32 + sizeof(tpm20_log_descr_t);
-                evt_log->event_log_descr[i].next_event_offset =
-                        32 + sizeof(tpm20_log_descr_t);
-            }
         }
         break;
     case TB_EXTPOL_EMBEDDED:
@@ -256,12 +250,6 @@ static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
             evt_log->event_log_descr[i].size = 4096;
             evt_log->event_log_descr[i].pcr_events_offset = 0;
             evt_log->event_log_descr[i].next_event_offset = 0;
-            if (g_tpm->algs[i] != TB_HALG_SHA1) {
-                evt_log->event_log_descr[i].pcr_events_offset =
-                        32 + sizeof(tpm20_log_descr_t);
-                evt_log->event_log_descr[i].next_event_offset =
-                        32 + sizeof(tpm20_log_descr_t);
-            }
         }
         break;
     case TB_EXTPOL_FIXED:
@@ -271,12 +259,6 @@ static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
         evt_log->event_log_descr[0].size = 4096;
         evt_log->event_log_descr[0].pcr_events_offset = 0;
         evt_log->event_log_descr[0].next_event_offset = 0;
-        if (g_tpm->cur_alg != TB_HALG_SHA1) {
-            evt_log->event_log_descr[0].pcr_events_offset =
-                    32 + sizeof(tpm20_log_descr_t);
-            evt_log->event_log_descr[0].next_event_offset =
-                    32 + sizeof(tpm20_log_descr_t);
-        }
         break;
     default:
         return;
@@ -361,6 +343,11 @@ void dump_event_2(void)
         *((u64 *)(&next)) = log_descr->phys_addr +
                 log_descr->next_event_offset;
 
+        if ( log_descr->alg != TB_HALG_SHA1 ) {
+            print_event_2(curr, TB_HALG_SHA1);
+            curr += sizeof(tpm12_pcr_event_t) + sizeof(tpm20_log_descr_t);
+        }
+
         while ( curr < next ) {
             print_event_2(curr, log_descr->alg);
             data_size = *(uint32_t *)(curr + 2*sizeof(uint32_t) + hash_size);
@@ -398,7 +385,7 @@ bool evtlog_append_tpm20(uint8_t pcr, uint16_t alg, tb_hash_t *hash, uint32_t ty
     *((u32 *)next) = type;
     next += sizeof(u32);
     memcpy((uint8_t *)next, hash, hash_size);
-    next += hash_size/sizeof(uint32_t);
+    next += hash_size;
     *((u32 *)next) = 0;
     cur_desc->next_event_offset += 3*sizeof(uint32_t) + hash_size; 
 
