@@ -49,6 +49,7 @@
 #include <tpm.h>
 #include <tboot.h>
 #include <txt/config_regs.h>
+#include <cmdline.h>
 
 #define TB_LAUNCH_ERR_IDX     0x20000002      /* launch error index */
 
@@ -81,7 +82,10 @@ void print_tb_error_msg(tb_error_t error)
         case TB_ERR_VMX_NOT_SUPPORTED:
             printk(TBOOT_ERR"VMX not supported.\n");
             break;
-        case TB_ERR_TXT_NOT_SUPPORTED:
+        case TB_ERR_VTD_NOT_SUPPORTED:
+	    printk(TBOOT_ERR"DMAR table not found. Check if Vt-D is enabled in BIOS.\n");
+	    break;
+	case TB_ERR_TXT_NOT_SUPPORTED:
             printk(TBOOT_ERR"TXT not supported.\n");
             break;
         case TB_ERR_MODULES_NOT_IN_POLICY:
@@ -114,6 +118,9 @@ void print_tb_error_msg(tb_error_t error)
         case TB_ERR_NV_VERIFICATION_FAILED:
             printk(TBOOT_ERR"verifying nv against policy failed.\n");
             break;
+        case TB_ERR_PREV_TXT_ERROR:
+            printk(TBOOT_ERR"previous measured launch had errors, skipping measured launch...\n");
+            break;
         default:
             printk(TBOOT_ERR"unknown error (%d).\n", error);
             break;
@@ -129,18 +136,23 @@ void print_tb_error_msg(tb_error_t error)
 bool read_tb_error_code(tb_error_t *error)
 {
     uint32_t size = sizeof(tb_error_t);
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
 
     if ( error == NULL ) {
         printk(TBOOT_ERR"Error: error pointer is zero.\n");
         return false;
     }
 
-    memset(error, 0, size);
+    tb_memset(error, 0, size);
+
+    if ( get_tboot_ignore_prev_err() )
+        return true;
 
     /* read! */
-    if ( !g_tpm->nv_read(g_tpm, 0, g_tpm->tb_err_index, 0,
+    if ( !tpm_fp->nv_read(tpm, 0, tpm->tb_err_index, 0,
                 (uint8_t *)error, &size) ) {
-        printk(TBOOT_WARN"Error: read TPM error: 0x%x.\n", g_tpm->error);
+        printk(TBOOT_WARN"Error: read TPM error: 0x%x.\n", tpm->error);
         no_err_idx = true;
         return false;
     }
@@ -157,12 +169,18 @@ bool read_tb_error_code(tb_error_t *error)
  */
 bool write_tb_error_code(tb_error_t error)
 {
-    if ( !g_tpm || no_err_idx )
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
+    
+    if ( get_tboot_ignore_prev_err() )
+        return true;
+
+    if ( !tpm || !tpm_fp || no_err_idx )
         return false;
 
-    if ( !g_tpm->nv_write(g_tpm, g_tpm->cur_loc, g_tpm->tb_err_index, 0,
+    if ( !tpm_fp->nv_write(tpm, tpm->cur_loc, tpm->tb_err_index, 0,
 				      (uint8_t *)&error, sizeof(tb_error_t)) ) {
-        printk(TBOOT_WARN"Error: write TPM error: 0x%x.\n", g_tpm->error);
+        printk(TBOOT_WARN"Error: write TPM error: 0x%x.\n", tpm->error);
         no_err_idx = true;
         return false;
     }
@@ -181,7 +199,7 @@ bool was_last_boot_error(void)
 
     /* check TB_LAUNCH_ERR_IDX */
     if ( read_tb_error_code(&error) ) {
-        if ( error != TB_ERR_FIXED )
+        if ( error != TB_ERR_FIXED && error != TB_ERR_NONE )
             return true;
     }
 

@@ -97,10 +97,12 @@ static const tb_policy_map_t g_policy_map[] = {
     { TB_POLTYPE_CONT_NON_FATAL,               TB_POLACT_CONTINUE,
       {
           {TB_ERR_FATAL,                       TB_POLACT_HALT},
+          {TB_ERR_PREV_TXT_ERROR,              TB_POLACT_UNMEASURED_LAUNCH}, 
           {TB_ERR_TPM_NOT_READY,               TB_POLACT_UNMEASURED_LAUNCH},
           {TB_ERR_SMX_NOT_SUPPORTED,           TB_POLACT_UNMEASURED_LAUNCH},
           {TB_ERR_VMX_NOT_SUPPORTED,           TB_POLACT_UNMEASURED_LAUNCH},
-          {TB_ERR_TXT_NOT_SUPPORTED,           TB_POLACT_UNMEASURED_LAUNCH},
+          {TB_ERR_VTD_NOT_SUPPORTED,           TB_POLACT_UNMEASURED_LAUNCH},
+	  {TB_ERR_TXT_NOT_SUPPORTED,           TB_POLACT_UNMEASURED_LAUNCH},
           {TB_ERR_SINIT_NOT_PRESENT,           TB_POLACT_UNMEASURED_LAUNCH},
           {TB_ERR_ACMOD_VERIFY_FAILED,         TB_POLACT_UNMEASURED_LAUNCH},
           {TB_ERR_NONE,                        TB_POLACT_CONTINUE},
@@ -207,13 +209,15 @@ static bool read_policy_from_tpm(uint32_t index, void* policy_index, size_t *pol
     unsigned int offset = 0;
     unsigned int data_size = 0;
     uint32_t ret, index_size;
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
 
     if ( policy_index_size == NULL ) {
         printk(TBOOT_ERR"size is NULL\n");
         return false;
     }
 
-    ret = g_tpm->get_nvindex_size(g_tpm, g_tpm->cur_loc, index, &index_size);
+    ret = tpm_fp->get_nvindex_size(tpm, tpm->cur_loc, index, &index_size);
     if ( !ret )
         return false;
 
@@ -231,7 +235,7 @@ static bool read_policy_from_tpm(uint32_t index, void* policy_index, size_t *pol
             data_size = (uint32_t)(index_size - offset);
 
         /* read! */
-        ret = g_tpm->nv_read(g_tpm, g_tpm->cur_loc, index, offset,
+        ret = tpm_fp->nv_read(tpm, tpm->cur_loc, index, offset,
                              (uint8_t *)policy_index + offset, &data_size);
         if ( !ret || data_size == 0 )
             break;
@@ -278,7 +282,7 @@ static bool unwrap_lcp_policy(void)
     }
 
     /* if lcp policy data version is 2+ */
-    if ( memcmp((void *)lcp_base, LCP_POLICY_DATA_FILE_SIGNATURE,
+    if ( tb_memcmp((void *)lcp_base, LCP_POLICY_DATA_FILE_SIGNATURE,
              LCP_FILE_SIG_LENGTH) == 0 ) {
         lcp_policy_data_t *poldata = (lcp_policy_data_t *)lcp_base;
         lcp_policy_list_t *pollist = &poldata->policy_lists[0];
@@ -297,7 +301,7 @@ static bool unwrap_lcp_policy(void)
                     /* check uuid in custom element */
                     if ( are_uuids_equal(&custom->uuid,
                              &((uuid_t)LCP_CUSTOM_ELEMENT_TBOOT_UUID)) ) {
-                        memcpy(_policy_index_buf, &custom->data,
+                        tb_memcpy(_policy_index_buf, &custom->data,
                             elt->size - sizeof(*elt) - sizeof(uuid_t));
                         return true; /* find tb policy */
                     }
@@ -328,10 +332,12 @@ static bool unwrap_lcp_policy(void)
  */
 tb_error_t set_policy(void)
 {
+    const struct tpm_if *tpm = get_tpm();
+    
     /* try to read tboot policy from TB_POLICY_INDEX in TPM NV */
     size_t policy_index_size = sizeof(_policy_index_buf);
     printk(TBOOT_INFO"reading Verified Launch Policy from TPM NV...\n");
-    if ( read_policy_from_tpm(g_tpm->tb_policy_index,
+    if ( read_policy_from_tpm(tpm->tb_policy_index,
              _policy_index_buf, &policy_index_size) ) {
         printk(TBOOT_DETA"\t:%lu bytes read\n", policy_index_size);
         if ( verify_policy((tb_policy_t *)_policy_index_buf,
@@ -347,7 +353,7 @@ tb_error_t set_policy(void)
      * type is LCP_POLTYPE_LIST (since we could have been give a policy data
      * file even though the policy was not a LIST */
     printk(TBOOT_INFO"reading Launch Control Policy from TPM NV...\n");
-    if ( read_policy_from_tpm(g_tpm->lcp_own_index,
+    if ( read_policy_from_tpm(tpm->lcp_own_index,
              _policy_index_buf, &policy_index_size) ) {
         printk(TBOOT_DETA"\t:%lu bytes read\n", policy_index_size);
         /* assume lcp policy has been verified by sinit already */
@@ -409,6 +415,9 @@ static bool hash_module(hash_list_t *hl,
                         const char* cmdline, void *base,
                         size_t size)
 {
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
+
     if ( hl == NULL ) {
         printk(TBOOT_ERR"Error: input parameter is wrong.\n");
         return false;
@@ -425,19 +434,19 @@ static bool hash_module(hash_list_t *hl,
     // else
     //    cmdline = skip_filename(cmdline);
 
-    switch (g_tpm->extpol) {
+    switch (tpm->extpol) {
     case TB_EXTPOL_FIXED: 
         hl->count = 1;
-        hl->entries[0].alg = g_tpm->cur_alg;
+        hl->entries[0].alg = tpm->cur_alg;
 
-        if ( !hash_buffer((const unsigned char *)cmdline, strlen(cmdline),
-                    &hl->entries[0].hash, g_tpm->cur_alg) )
+        if ( !hash_buffer((const unsigned char *)cmdline, tb_strlen(cmdline),
+                    &hl->entries[0].hash, tpm->cur_alg) )
             return false;
         /* hash image and extend into cmdline hash */
         tb_hash_t img_hash;
-        if ( !hash_buffer(base, size, &img_hash, g_tpm->cur_alg) )
+        if ( !hash_buffer(base, size, &img_hash, tpm->cur_alg) )
             return false;
-        if ( !extend_hash(&hl->entries[0].hash, &img_hash, g_tpm->cur_alg) )
+        if ( !extend_hash(&hl->entries[0].hash, &img_hash, tpm->cur_alg) )
             return false;
 
         break;
@@ -445,25 +454,22 @@ static bool hash_module(hash_list_t *hl,
     case TB_EXTPOL_AGILE: 
     {
         hash_list_t img_hl, final_hl;
-        if ( !g_tpm->hash(g_tpm, 2, (const unsigned char *)cmdline,
-                strlen(cmdline), hl) ) {
-            if ( !g_tpm->hash(g_tpm, 2, base, size, hl) )
-                return false;
-            return true;
-        }
+        if ( !tpm_fp->hash(tpm, 2, (const unsigned char *)cmdline,
+                tb_strlen(cmdline), hl) )
+            return false;
 
         uint8_t buf[128];
 
-        if ( !g_tpm->hash(g_tpm, 2, base, size, &img_hl) )
+        if ( !tpm_fp->hash(tpm, 2, base, size, &img_hl) )
             return false;
         for (unsigned int i=0; i<hl->count; i++) {
             for (unsigned int j=0; j<img_hl.count; j++) {
                 if (hl->entries[i].alg == img_hl.entries[j].alg) {
                     copy_hash((tb_hash_t *)buf, &hl->entries[i].hash,
                             hl->entries[i].alg);
-                    copy_hash((tb_hash_t *)buf + get_hash_size(hl->entries[i].alg),
+                    copy_hash((tb_hash_t *)(buf + get_hash_size(hl->entries[i].alg)),
                             &img_hl.entries[j].hash, hl->entries[i].alg);
-                    if ( !g_tpm->hash(g_tpm, 2, buf,
+                    if ( !tpm_fp->hash(tpm, 2, buf,
                             2*get_hash_size(hl->entries[i].alg), &final_hl) )
                         return false;
 
@@ -487,16 +493,16 @@ static bool hash_module(hash_list_t *hl,
     case TB_EXTPOL_EMBEDDED: 
     {
         tb_hash_t img_hash;
-        hl->count = g_tpm->alg_count;
+        hl->count = tpm->alg_count;
         for (unsigned int i=0; i<hl->count; i++) {
-            hl->entries[i].alg = g_tpm->algs[i];
-            if ( !hash_buffer((const unsigned char *)cmdline, strlen(cmdline),
-                        &hl->entries[i].hash, g_tpm->algs[i]) )
+            hl->entries[i].alg = tpm->algs[i];
+            if ( !hash_buffer((const unsigned char *)cmdline, tb_strlen(cmdline),
+                        &hl->entries[i].hash, tpm->algs[i]) )
                 return false;
 
-            if ( !hash_buffer(base, size, &img_hash, g_tpm->algs[i]) )
+            if ( !hash_buffer(base, size, &img_hash, tpm->algs[i]) )
                 return false;
-            if ( !extend_hash(&hl->entries[i].hash, &img_hash, g_tpm->algs[i]) )
+            if ( !extend_hash(&hl->entries[i].hash, &img_hash, tpm->algs[i]) )
                 return false;
         }
 
@@ -614,16 +620,21 @@ static tb_error_t verify_module(module_t *module, tb_policy_entry_t *pol_entry,
     void *base = (void *)module->mod_start;
     size_t size = module->mod_end - module->mod_start;
     char *cmdline = get_module_cmd(g_ldr_ctx, module);
+    if (cmdline == NULL) {
+        printk(TBOOT_ERR"Error: failed to get module cmdline\n");
+        return TB_ERR_MODULE_VERIFICATION_FAILED;
+    }
+    const struct tpm_if *tpm = get_tpm();
 
     if ( pol_entry != NULL ) {
         /* chunk the command line into 80 byte chunks */
 #define CHUNK_SIZE 80
-        int      cmdlen = strlen(cmdline);
+        int      cmdlen = tb_strlen(cmdline);
         char    *cptr = cmdline;
         char     cmdchunk[CHUNK_SIZE+1];
         printk(TBOOT_INFO"verifying module \"");
         while (cmdlen > 0) {
-            strncpy(cmdchunk, cptr, CHUNK_SIZE);
+            tb_strncpy(cmdchunk, cptr, CHUNK_SIZE);
             cmdchunk[CHUNK_SIZE] = 0;
             printk(TBOOT_INFO"\n%s", cmdchunk);
             cmdlen -= CHUNK_SIZE;
@@ -651,7 +662,7 @@ static tb_error_t verify_module(module_t *module, tb_policy_entry_t *pol_entry,
         VL_ENTRIES(NUM_VL_ENTRIES++).hl = hl;
     }
 
-    if ( g_tpm->extpol != TB_EXTPOL_FIXED )
+    if ( tpm->extpol != TB_EXTPOL_FIXED )
         return TB_ERR_NONE;
 
     if ( pol_entry != NULL &&
@@ -669,6 +680,9 @@ static tb_error_t verify_module(module_t *module, tb_policy_entry_t *pol_entry,
 
 static void verify_g_policy(void)
 {
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
+   
     /* assumes mbi is valid */
     printk(TBOOT_INFO"verifying policy \n");
 
@@ -676,39 +690,39 @@ static void verify_g_policy(void)
     /* hash will be <policy control field (4bytes)> | <hash policy> */
     /* where <hash policy> will be 0s if TB_POLCTL_EXTEND_PCR17 is clear */
     static uint8_t buf[sizeof(tb_hash_t) + sizeof(g_policy->policy_control)];
-    memset(buf, 0, sizeof(buf));
-    memcpy(buf, &g_policy->policy_control, sizeof(g_policy->policy_control));
+    tb_memset(buf, 0, sizeof(buf));
+    tb_memcpy(buf, &g_policy->policy_control, sizeof(g_policy->policy_control));
     if ( g_policy->policy_control & TB_POLCTL_EXTEND_PCR17 ) {
         if ( !hash_policy((tb_hash_t *)&buf[sizeof(g_policy->policy_control)],
-                          g_tpm->cur_alg) ) {
+                          tpm->cur_alg) ) {
             printk(TBOOT_ERR"policy hash failed\n");
             apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
         }
     }
 
-    u32 size = get_hash_size(g_tpm->cur_alg) + sizeof(g_policy->policy_control);
-    switch (g_tpm->extpol) {
+    u32 size = get_hash_size(tpm->cur_alg) + sizeof(g_policy->policy_control);
+    switch (tpm->extpol) {
     case TB_EXTPOL_FIXED: 
         VL_ENTRIES(NUM_VL_ENTRIES).hl.count = 1;
-        VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].alg = g_tpm->cur_alg;
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].alg = tpm->cur_alg;
         if ( !hash_buffer(buf, size,
-                &VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].hash, g_tpm->cur_alg) )
+                &VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].hash, tpm->cur_alg) )
             apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
 
         break;
 
     case TB_EXTPOL_AGILE: 
-        if ( !g_tpm->hash(g_tpm, 2, buf, size, &VL_ENTRIES(NUM_VL_ENTRIES).hl) )
+        if ( !tpm_fp->hash(tpm, 2, buf, size, &VL_ENTRIES(NUM_VL_ENTRIES).hl) )
             apply_policy(TB_ERR_MODULE_VERIFICATION_FAILED);
         break;
 
     case TB_EXTPOL_EMBEDDED: 
     {
-        VL_ENTRIES(NUM_VL_ENTRIES).hl.count = g_tpm->alg_count;
-        for (int i=0; i<g_tpm->alg_count; i++) {
-            VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[i].alg = g_tpm->algs[i];
+        VL_ENTRIES(NUM_VL_ENTRIES).hl.count = tpm->alg_count;
+        for (int i=0; i<tpm->alg_count; i++) {
+            VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[i].alg = tpm->algs[i];
             if ( !hash_buffer(buf, size, &VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[i].hash,
-                        g_tpm->algs[i]) )
+                        tpm->algs[i]) )
                 return;
         }
 
@@ -805,6 +819,8 @@ static tb_error_t verify_nvindex(tb_policy_entry_t *pol_entry,
     size_t nv_size = sizeof(nv_buf);
     tb_hash_t digest;
     uint32_t attribute;
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
 
     if ( pol_entry == NULL )
         return TB_ERR_NV_VERIFICATION_FAILED;
@@ -812,7 +828,7 @@ static tb_error_t verify_nvindex(tb_policy_entry_t *pol_entry,
     printk(TBOOT_INFO"verifying nv index 0x%08X\n", pol_entry->nv_index);
 
     /* check nv attribute */
-    if ( !g_tpm->get_nvindex_permission(g_tpm, 0, pol_entry->nv_index,
+    if ( !tpm_fp->get_nvindex_permission(tpm, 0, pol_entry->nv_index,
                                                    &attribute) ) {
         printk(TBOOT_ERR"\t :reading nv index permission failed\n");
         return TB_ERR_NV_VERIFICATION_FAILED;
@@ -823,7 +839,7 @@ static tb_error_t verify_nvindex(tb_policy_entry_t *pol_entry,
     }
 
     /* get nv content */
-    memset(nv_buf, 0, sizeof(nv_buf));
+    tb_memset(nv_buf, 0, sizeof(nv_buf));
     if ( !read_policy_from_tpm(pol_entry->nv_index,
                 nv_buf, &nv_size) ) {
         printk(TBOOT_ERR"\t :reading nv index 0x%08X failed\n",
@@ -846,7 +862,7 @@ static tb_error_t verify_nvindex(tb_policy_entry_t *pol_entry,
                    (int)nv_size, sizeof(digest.sha1));
             return TB_ERR_NV_VERIFICATION_FAILED;
         }
-        memcpy(digest.sha1, nv_buf, nv_size);
+        tb_memcpy(digest.sha1, nv_buf, nv_size);
         break;
     default:
         printk(TBOOT_ERR"\t :bad mod number for NV measuring in policy entry: %d\n",
@@ -863,7 +879,7 @@ static tb_error_t verify_nvindex(tb_policy_entry_t *pol_entry,
         VL_ENTRIES(NUM_VL_ENTRIES).pcr = pol_entry->pcr;
         VL_ENTRIES(NUM_VL_ENTRIES).hl.count = 1;
         VL_ENTRIES(NUM_VL_ENTRIES).hl.entries[0].alg = TB_HALG_SHA1;
-        memcpy(VL_ENTRIES(NUM_VL_ENTRIES++).hl.entries[0].hash.sha1,
+        tb_memcpy(VL_ENTRIES(NUM_VL_ENTRIES++).hl.entries[0].hash.sha1,
                 digest.sha1, SHA1_LENGTH);
     }
 

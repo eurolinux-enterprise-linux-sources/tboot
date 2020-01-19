@@ -65,11 +65,11 @@ printk_long(const char *what)
 {
     /* chunk the command line into 70 byte chunks */
 #define CHUNK_SIZE 70
-    int      cmdlen = strlen(what);
+    int      cmdlen = tb_strlen(what);
     const char    *cptr = what;
     char     cmdchunk[CHUNK_SIZE+1];
     while (cmdlen > 0) {
-        strncpy(cmdchunk, cptr, CHUNK_SIZE);
+        tb_strncpy(cmdchunk, cptr, CHUNK_SIZE);
         cmdchunk[CHUNK_SIZE] = 0;
         printk(TBOOT_INFO"\t%s\n", cmdchunk);
         cmdlen -= CHUNK_SIZE;
@@ -120,8 +120,8 @@ bool expand_linux_image(const void *linux_image, size_t linux_size,
 
     /* recommended layout
         0x0000 - 0x7FFF     Real mode kernel
-        0x8000 - 0x8FFF     Stack and heap
-        0x9000 - 0x90FF     Kernel command line
+        0x8000 - 0x8CFF     Stack and heap
+        0x8D00 - 0x90FF     Kernel command line
         for details, see linux_defns.h
     */
 
@@ -161,54 +161,71 @@ bool expand_linux_image(const void *linux_image, size_t linux_size,
     hdr->loadflags |= FLAG_CAN_USE_HEAP;         /* can use heap */
     hdr->heap_end_ptr = KERNEL_CMDLINE_OFFSET - BOOT_SECTOR_OFFSET;
 
-    /* load initrd and set ramdisk_image and ramdisk_size */
-    /* The initrd should typically be located as high in memory as
-       possible, as it may otherwise get overwritten by the early
-       kernel initialization sequence. */
+    if ( initrd_size > 0 ) {
+        /* load initrd and set ramdisk_image and ramdisk_size */
+        /* The initrd should typically be located as high in memory as
+           possible, as it may otherwise get overwritten by the early
+           kernel initialization sequence. */
 
-    /* check if Linux command line explicitly specified a memory limit */
-    uint64_t mem_limit;
-    get_linux_mem(&mem_limit);
-    if ( mem_limit > 0x100000000ULL || mem_limit == 0 )
-        mem_limit = 0x100000000ULL;
+        /* check if Linux command line explicitly specified a memory limit */
+        uint64_t mem_limit;
+        get_linux_mem(&mem_limit);
+        if ( mem_limit > 0x100000000ULL || mem_limit == 0 )
+            mem_limit = 0x100000000ULL;
 
-    uint64_t max_ram_base, max_ram_size;
-    get_highest_sized_ram(initrd_size, mem_limit,
-                          &max_ram_base, &max_ram_size);
-    if ( max_ram_size == 0 ) {
-        printk(TBOOT_ERR"not enough RAM for initrd\n");
-        return false;
-    }
-    if ( initrd_size > max_ram_size ) {
-        printk(TBOOT_ERR"initrd_size is too large\n");
-        return false;
-    }
-    if ( max_ram_base > ((uint64_t)(uint32_t)(~0)) ) {
-        printk(TBOOT_ERR"max_ram_base is too high\n");
-        return false;
-    }
-    if ( plus_overflow_u32((uint32_t)max_ram_base,
-             (uint32_t)(max_ram_size - initrd_size)) ) {
-        printk(TBOOT_ERR"max_ram overflows\n");
-        return false;
-    }
-    initrd_base = (max_ram_base + max_ram_size - initrd_size) & PAGE_MASK;
-
-    /* should not exceed initrd_addr_max */
-    if ( initrd_base + initrd_size > hdr->initrd_addr_max ) {
-        if ( hdr->initrd_addr_max < initrd_size ) {
-            printk(TBOOT_ERR"initrd_addr_max is too small\n");
+        uint64_t max_ram_base, max_ram_size;
+        get_highest_sized_ram(initrd_size, mem_limit,
+                              &max_ram_base, &max_ram_size);
+        if ( max_ram_size == 0 ) {
+            printk(TBOOT_ERR"not enough RAM for initrd\n");
             return false;
         }
-        initrd_base = hdr->initrd_addr_max - initrd_size;
-        initrd_base = initrd_base & PAGE_MASK;
-    }
+        if ( initrd_size > max_ram_size ) {
+            printk(TBOOT_ERR"initrd_size is too large\n");
+            return false;
+        }
+        if ( max_ram_base > ((uint64_t)(uint32_t)(~0)) ) {
+            printk(TBOOT_ERR"max_ram_base is too high\n");
+            return false;
+        }
+        if ( plus_overflow_u32((uint32_t)max_ram_base,
+                 (uint32_t)(max_ram_size - initrd_size)) ) {
+            printk(TBOOT_ERR"max_ram overflows\n");
+            return false;
+        }
+        initrd_base = (max_ram_base + max_ram_size - initrd_size) & PAGE_MASK;
 
-    memmove((void *)initrd_base, initrd_image, initrd_size);
-    printk(TBOOT_DETA"Initrd from 0x%lx to 0x%lx\n",
-           (unsigned long)initrd_base,
-           (unsigned long)(initrd_base + initrd_size));
+        /* should not exceed initrd_addr_max */
+        if ( initrd_base + initrd_size > hdr->initrd_addr_max ) {
+            if ( hdr->initrd_addr_max < initrd_size ) {
+                printk(TBOOT_ERR"initrd_addr_max is too small\n");
+                return false;
+            }
+            initrd_base = hdr->initrd_addr_max - initrd_size;
+            initrd_base = initrd_base & PAGE_MASK;
+        }
 
+        /* check for overlap with a kernel image placed high in memory */
+        if( (initrd_base < ((uint32_t)linux_image + linux_size))
+            && ((uint32_t)linux_image < (initrd_base+initrd_size)) ){
+            /* set the starting address just below the image */
+            initrd_base = (uint32_t)linux_image - initrd_size;
+            initrd_base = initrd_base & PAGE_MASK;
+            /* make sure we're still in usable RAM and above tboot end address*/
+            if( initrd_base < max_ram_base ){
+                printk(TBOOT_ERR"no available memory for initrd\n");
+                return false;
+            }
+        }
+
+        tb_memmove((void *)initrd_base, initrd_image, initrd_size);
+        printk(TBOOT_DETA"Initrd from 0x%lx to 0x%lx\n",
+               (unsigned long)initrd_base,
+               (unsigned long)(initrd_base + initrd_size));
+
+    } 
+    else
+        initrd_base = (uint32_t)initrd_image;
     hdr->ramdisk_image = initrd_base;
     hdr->ramdisk_size = initrd_size;
 
@@ -288,34 +305,46 @@ bool expand_linux_image(const void *linux_image, size_t linux_size,
     /* set cmd_line_ptr */
     hdr->cmd_line_ptr = real_mode_base + KERNEL_CMDLINE_OFFSET;
 
+    /* Save linux header struct to temp memory, in case the it is overwritten by tb_memmove below*/
+    linux_kernel_header_t temp_hdr;
+    tb_memmove(&temp_hdr, hdr, sizeof(temp_hdr));
+    hdr = &temp_hdr;
+
     /* load protected-mode part */
-    memmove((void *)protected_mode_base, linux_image + real_mode_size,
+    tb_memmove((void *)protected_mode_base, linux_image + real_mode_size,
             protected_mode_size);
     printk(TBOOT_DETA"Kernel (protected mode) from 0x%lx to 0x%lx\n",
            (unsigned long)protected_mode_base,
            (unsigned long)(protected_mode_base + protected_mode_size));
 
     /* load real-mode part */
-    memmove((void *)real_mode_base, linux_image, real_mode_size);
+    tb_memmove((void *)real_mode_base, linux_image, real_mode_size);
     printk(TBOOT_DETA"Kernel (real mode) from 0x%lx to 0x%lx\n",
            (unsigned long)real_mode_base,
            (unsigned long)(real_mode_base + real_mode_size));
 
     /* copy cmdline */
     const char *kernel_cmdline = get_cmdline(g_ldr_ctx);
+    if ( kernel_cmdline == NULL ) {
+        printk(TBOOT_ERR"Error: kernel cmdline not available\n");
+        return false;
+    }
+    const size_t kernel_cmdline_size = REAL_END_OFFSET - KERNEL_CMDLINE_OFFSET;
+    size_t kernel_cmdline_strlen = tb_strlen(kernel_cmdline);
+    if (kernel_cmdline_strlen > kernel_cmdline_size - 1)
+        kernel_cmdline_strlen = kernel_cmdline_size - 1;
+    tb_memset((void *)hdr->cmd_line_ptr, 0, kernel_cmdline_size);
+    tb_memcpy((void *)hdr->cmd_line_ptr, kernel_cmdline, kernel_cmdline_strlen);
 
-    printk(TBOOT_INFO"Linux cmdline placed in header: ");
-    printk_long(kernel_cmdline);
-    printk(TBOOT_INFO"\n");
-   
-    memset((void *)hdr->cmd_line_ptr,0,TBOOT_KERNEL_CMDLINE_SIZE);
-
-    memcpy((void *)hdr->cmd_line_ptr, kernel_cmdline, strlen(kernel_cmdline));
+    printk(TBOOT_INFO"Linux cmdline from 0x%lx to 0x%lx:\n",
+           (unsigned long)hdr->cmd_line_ptr,
+           (unsigned long)(hdr->cmd_line_ptr + kernel_cmdline_size));
+    printk_long((void *)hdr->cmd_line_ptr);
 
     /* need to put boot_params in real mode area so it gets mapped */
     boot_params = (boot_params_t *)(real_mode_base + real_mode_size);
-    memset(boot_params, 0, sizeof(*boot_params));
-    memcpy(&boot_params->hdr, hdr, sizeof(*hdr));
+    tb_memset(boot_params, 0, sizeof(*boot_params));
+    tb_memcpy(&boot_params->hdr, hdr, sizeof(*hdr));
 
     /* need to handle a few EFI things here if such is our parentage */
     if (is_loader_launch_efi(g_ldr_ctx)){
@@ -325,8 +354,12 @@ bool expand_linux_image(const void *linux_image, size_t linux_size,
         uint32_t address = 0;
         uint64_t long_address = 0UL;
 
+        uint32_t descr_size = 0, descr_vers = 0, mmap_size = 0, efi_mmap_addr = 0;
+
+
+
         /* loader signature */
-        memcpy(&efi->efi_ldr_sig, "EL64", sizeof(uint32_t));
+        tb_memcpy(&efi->efi_ldr_sig, "EL64", sizeof(uint32_t));
 
         /* EFI system table addr */
         {
@@ -343,26 +376,30 @@ bool expand_linux_image(const void *linux_image, size_t linux_size,
             }
         }
 
-        /* EFI memmap descriptor size */
-        efi->efi_memdescr_size = 0x30;
+        efi_mmap_addr = find_efi_memmap(g_ldr_ctx, &descr_size,
+                                        &descr_vers, &mmap_size);
+        if (!efi_mmap_addr) {
+            printk(TBOOT_INFO"failed to get EFI memory map\n");
+            efi->efi_memdescr_size = 0x1; // Avoid div by 0 in kernel.
+            efi->efi_memmap_size = 0;
+            efi->efi_memmap = 0;
+        } else {
+            efi->efi_memdescr_size = descr_size;
+            efi->efi_memdescr_ver = descr_vers;
+            efi->efi_memmap_size = mmap_size;
+            efi->efi_memmap = efi_mmap_addr;
+            /* From Multiboot2 spec:
+             * The bootloader must not load any part of the kernel, the modules,
+             * the Multiboot2 information structure, etc. higher than 4 GiB - 1.
+             */
+            efi->efi_memmap_hi = 0;
 
-        /* EFI memmap descriptor version */
-        efi->efi_memdescr_ver = 1;
+            printk(TBOOT_INFO "EFI memmap: memmap base: 0x%x, memmap size: 0x%x\n",
+                  efi->efi_memmap, efi->efi_memmap_size);
+            printk(TBOOT_INFO "EFI memmap: descr size: 0x%x, descr version: 0x%x\n",
+                  efi->efi_memdescr_size, efi->efi_memdescr_ver);
+         }
 
-#if 1   /* EFI memmap addr */
-        {
-            uint32_t length;
-            efi->efi_memmap = (uint32_t) get_efi_memmap(&length);
-            /* EFI memmap size */
-            efi->efi_memmap_size = length;
-        }
-#else
-        efi->efi_memmap = 0;
-        efi->efi_memmap_size = 0x70;
-#endif
-
-        /* EFI memmap high--since we're consing our own, we know this == 0 */
-        efi->efi_memmap_hi = 0;
         /* if we're here, GRUB2 probably threw a framebuffer tag at us */
         load_framebuffer_info(g_ldr_ctx, (void *)scr);
     }
@@ -372,6 +409,10 @@ bool expand_linux_image(const void *linux_image, size_t linux_size,
         int i;
 
         memory_map_t *p = get_loader_memmap(g_ldr_ctx);
+        if ( p == NULL ) {
+            printk(TBOOT_ERR"Error: no memory map available\n");
+            return false;
+        }
         uint32_t memmap_start = (uint32_t) p;
         uint32_t memmap_length = get_loader_memmap_length(g_ldr_ctx);
         for ( i = 0; (uint32_t)p < memmap_start + memmap_length; i++ )

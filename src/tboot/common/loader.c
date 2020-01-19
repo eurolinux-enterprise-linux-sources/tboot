@@ -76,7 +76,7 @@ extern bool jump_elf_image(const void *entry_point, uint32_t magic);
 extern bool jump_linux_image(const void *entry_point);
 extern bool is_sinit_acmod(const void *acmod_base, uint32_t acmod_size, 
                            bool quiet);
-
+extern void apply_policy(tb_error_t error);
 extern uint32_t g_mb_orig_size;
 
 #define LOADER_CTX_BAD(xctx) \
@@ -94,11 +94,11 @@ printk_long(char *what)
 {
     /* chunk the command line into 70 byte chunks */
 #define CHUNK_SIZE 70
-    int      cmdlen = strlen(what);
+    int      cmdlen = tb_strlen(what);
     char    *cptr = what;
     char     cmdchunk[CHUNK_SIZE+1];
     while (cmdlen > 0) {
-        strncpy(cmdchunk, cptr, CHUNK_SIZE);
+        tb_strncpy(cmdchunk, cptr, CHUNK_SIZE);
         cmdchunk[CHUNK_SIZE] = 0;
         printk(TBOOT_INFO"\t%s\n", cmdchunk);
         cmdlen -= CHUNK_SIZE;
@@ -195,13 +195,13 @@ void print_mbi(const multiboot_info_t *mbi)
     if ( mbi->flags & MBI_CMDLINE ) {
 # define CHUNK_SIZE 72 
         /* Break the command line up into 72 byte chunks */
-        int   cmdlen = strlen(mbi->cmdline);
+        int   cmdlen = tb_strlen(mbi->cmdline);
         char *cmdptr = (char *)mbi->cmdline;
         char  chunk[CHUNK_SIZE+1];
         printk(TBOOT_DETA"\t cmdline@0x%x: ", mbi->cmdline);
         chunk[CHUNK_SIZE] = '\0';
         while (cmdlen > 0) {
-            strncpy(chunk, cmdptr, CHUNK_SIZE); 
+            tb_strncpy(chunk, cmdptr, CHUNK_SIZE); 
             printk(TBOOT_DETA"\n\t\"%s\"", chunk);
             cmdptr += CHUNK_SIZE;
             cmdlen -= CHUNK_SIZE;
@@ -401,7 +401,7 @@ static void *remove_module(loader_ctx *lctx, void *mod_start)
         }
 
         /* copy remaing mods down by one */
-        memmove(m, m + 1, (mbi->mods_count - i - 1)*sizeof(module_t));
+        tb_memmove(m, m + 1, (mbi->mods_count - i - 1)*sizeof(module_t));
 
         mbi->mods_count--;
 
@@ -416,10 +416,18 @@ static void *remove_module(loader_ctx *lctx, void *mod_start)
         if ( mod_start == NULL ) {
             char *cmdline = get_cmdline(lctx);
             char *mod_string = get_module_cmd(lctx, m);
-            if ((strlen(mod_string)) > (strlen(cmdline))){
-                if (strlen(mod_string) >= TBOOT_KERNEL_CMDLINE_SIZE){
+            if ( cmdline == NULL ) {
+                printk(TBOOT_ERR"could not find cmdline\n");
+                return NULL;
+            }
+            if ( mod_string == NULL ) {
+                printk(TBOOT_ERR"could not find module cmdline\n");
+                return NULL;
+            }
+            if ((tb_strlen(mod_string)) > (tb_strlen(cmdline))){
+                if (tb_strlen(mod_string) >= TBOOT_KERNEL_CMDLINE_SIZE){
                     printk(TBOOT_ERR"No room to copy MB2 cmdline [%d < %d]\n",
-                           (int)(strlen(cmdline)), (int)(strlen(mod_string)));
+                           (int)(tb_strlen(cmdline)), (int)(tb_strlen(mod_string)));
                 } else {
                     char *s = mod_string;
                     char *d = cmdbuf;
@@ -496,7 +504,7 @@ static void *remove_module(loader_ctx *lctx, void *mod_start)
                 return NULL;
             }
 
-            grow_mb2_tag(lctx, cur, strlen(cmdbuf) - strlen(cmd->string));
+            grow_mb2_tag(lctx, cur, tb_strlen(cmdbuf) - tb_strlen(cmd->string));
 
             /* now we're all good, except for fixing up cmd */
             {
@@ -528,7 +536,7 @@ static bool adjust_kernel_cmdline(loader_ctx *lctx,
         if (old_cmdline == NULL)
             old_cmdline = "";
 
-        snprintf(new_cmdline, TBOOT_KERNEL_CMDLINE_SIZE, "%s tboot=%p",
+        tb_snprintf(new_cmdline, TBOOT_KERNEL_CMDLINE_SIZE, "%s tboot=%p",
                  old_cmdline, tboot_shared_addr);
         new_cmdline[TBOOT_KERNEL_CMDLINE_SIZE - 1] = '\0';
 
@@ -555,7 +563,7 @@ static bool adjust_kernel_cmdline(loader_ctx *lctx,
                 printk(TBOOT_ERR"adjust_kernel_cmdline() NULL MB2 cmd\n");
                 return NULL;
             }
-            uint32_t new_cmdline_tag_size = 2 * sizeof(uint32_t) + strlen(new_cmdline) + 1;
+            uint32_t new_cmdline_tag_size = 2 * sizeof(uint32_t) + tb_strlen(new_cmdline) + 1;
             if ( new_cmdline_tag_size > cmd->size ){
                 if (false ==
                     grow_mb2_tag(lctx, cur,
@@ -624,7 +632,7 @@ find_module(loader_ctx *lctx, void **base, size_t *size,
             printk(TBOOT_ERR"Error: image size is smaller than data size.\n");
             return false;
         }
-        if ( memcmp((void *)m->mod_start, data, len) == 0 ) {
+        if ( tb_memcmp((void *)m->mod_start, data, len) == 0 ) {
             *base = (void *)m->mod_start;
             if ( size != NULL )
                 *size = mod_size;
@@ -728,7 +736,7 @@ unsigned long get_mbi_mem_end_mb1(const multiboot_info_t *mbi)
     unsigned long end = (unsigned long)(mbi + 1);
 
     if ( mbi->flags & MBI_CMDLINE )
-        end = max(end, mbi->cmdline + strlen((char *)mbi->cmdline) + 1);
+        end = max(end, mbi->cmdline + tb_strlen((char *)mbi->cmdline) + 1);
     if ( mbi->flags & MBI_MODULES ) {
         end = max(end, mbi->mods_addr + mbi->mods_count * sizeof(module_t));
         unsigned int i;
@@ -736,7 +744,7 @@ unsigned long get_mbi_mem_end_mb1(const multiboot_info_t *mbi)
             module_t *p = get_module_mb1(mbi, i);
             if ( p == NULL )
                 break;
-            end = max(end, p->string + strlen((char *)p->string) + 1);
+            end = max(end, p->string + tb_strlen((char *)p->string) + 1);
         }
     }
     if ( mbi->flags & MBI_AOUT ) {
@@ -757,7 +765,7 @@ unsigned long get_mbi_mem_end_mb1(const multiboot_info_t *mbi)
     /*  GET CONFIGURATION bios call", so skip it */
     if ( mbi->flags & MBI_BTLDNAME )
         end = max(end, mbi->boot_loader_name
-                       + strlen((char *)mbi->boot_loader_name) + 1);
+                       + tb_strlen((char *)mbi->boot_loader_name) + 1);
     if ( mbi->flags & MBI_APM )
         /* per Grub-multiboot-Main Part2 Rev94-Structures, apm size is 20 */
         end = max(end, mbi->apm_table + 20);
@@ -774,98 +782,160 @@ unsigned long get_mbi_mem_end_mb1(const multiboot_info_t *mbi)
 /*
  * Move all mbi components/modules/mbi to end of memory
  */
-static bool move_modules_to_high_memory(loader_ctx *lctx)
+static bool move_modules_to_high_memory(loader_ctx  *lctx)
 {
-    uint64_t max_ram_base = 0,
-             max_ram_size = 0;
-    uint32_t memRequired = 0;
+    uint32_t memRequired;
+    uint64_t max_ram_base, max_ram_size, ld_ceiling;
 
-    uint32_t module_count = get_module_count(lctx);
+    uint32_t module_count, mod_i, mods_remaining;
+    module_t *m;
 
-    for ( unsigned int i = 0; i < module_count; i++ )
-    {
-        module_t *m = get_module(lctx,i);
+    if (LOADER_CTX_BAD(lctx))
+        return false;
+
+    /*  Determine the size of memory required to pack all modules together */
+    module_count = get_module_count(lctx);
+    for( memRequired=0, mod_i=0; mod_i < module_count; mod_i++ ){
+        m = get_module(lctx, mod_i);
         memRequired += PAGE_UP(m->mod_end - m->mod_start);
     }
 
-    get_highest_sized_ram(memRequired, 0x100000000ULL, &max_ram_base, &max_ram_size);
-    if(!max_ram_base || !max_ram_size)
-    {
-        printk(TBOOT_INFO"ERROR No suitable memory area found for image relocation!\n");
-	printk(TBOOT_INFO"required 0x%X\n", memRequired);
+    /*  NOTE: the e820 map has been modified already to reserve critical
+        memory regions (tboot memory, etc ...). get_highest_sized_ram
+        will return a range that excludes critical memory regions. */
+    get_highest_sized_ram(  memRequired, 0x100000000ULL,
+                            &max_ram_base, &max_ram_size);
+    if(!max_ram_base || !max_ram_size){
+        printk(TBOOT_INFO"ERROR No memory area found for image relocation!\n");
+        printk(TBOOT_INFO"required 0x%X\n", memRequired);
         return false;
     }
+    printk(TBOOT_INFO"highest suitable area @ 0x%llX (size 0x%llX)\n",
+            max_ram_base, max_ram_size);
+    ld_ceiling = PAGE_DOWN(max_ram_base + max_ram_size);
 
-    printk(TBOOT_INFO"highest suitable area @ 0x%llX (size 0x%llX)\n", max_ram_base, max_ram_size);
+    /*  Move modules below the load ceiling upto the ceiling:
+        Prevent module corruption:
+        - Move modules in order of highest to lowest.
+        - Only move modules completely below the load ceiling.
+     */
+    for( mods_remaining=module_count; mods_remaining > 0; mods_remaining--){
+        uint32_t    highest_mod_i = 0,
+                    highest_mod_base = 0,
+                    highest_mod_end = 0;
+        bool mod_found = false;
+        for( mod_i=0; mod_i<module_count; mod_i++){
+            m = get_module(lctx, mod_i);
+            if( (m->mod_start < ld_ceiling) ){
+                if( (m->mod_end > highest_mod_end) || !mod_found ){
+                    highest_mod_i   = mod_i;
+                    highest_mod_base= m->mod_start;
+                    highest_mod_end = m->mod_end;
+                    mod_found = true;
+                }
+            }
+        }
 
-    unsigned long target_addr =  PAGE_DOWN(max_ram_base + max_ram_size);
+        /* If no modules found, all modules are above ld_ceiling, We're done. */
+        if( !mod_found )
+            break;
 
-    for ( unsigned int i = 0; i < module_count; i++ )
-    {
-        unsigned long base, size;
-        module_t *m = get_module(lctx,i);
-        base = m->mod_start;
-        size = m->mod_end - m->mod_start;
-        printk(TBOOT_INFO"moving module %u (%lu bytes) from 0x%08X ", i, size, (uint32_t)base);
-
-        //calculate target addresses
-        target_addr = PAGE_DOWN(target_addr - size);
-        printk(TBOOT_INFO"to 0x%08X\n", (uint32_t)target_addr);
-
-        memcpy((void *)target_addr, (void *)base, size);
-        m->mod_start = target_addr;
-        m->mod_end = target_addr + size;
+        m = get_module(lctx, highest_mod_i);
+        /* only move the highest module if explicitly below the ceiling */
+        if(highest_mod_end < ld_ceiling){
+            uint32_t size = highest_mod_end - highest_mod_base;
+            uint32_t highest_mod_newbase = PAGE_DOWN(ld_ceiling-size);
+            printk(TBOOT_INFO"moving module %u (%u B) from 0x%08X to 0x%08X\n",
+                    highest_mod_i, size, highest_mod_base, highest_mod_newbase);
+            tb_memcpy((void *)highest_mod_newbase, (void *)highest_mod_base, size);
+            m->mod_start= highest_mod_newbase;
+            m->mod_end  = highest_mod_newbase+size;
+        }
+        /* lower the celing to the base address of the highest module */
+        ld_ceiling = PAGE_DOWN(m->mod_start);
     }
-
     return true;
 }
 
 /*
  * Move any mbi components/modules/mbi that just above the kernel
  */
-static bool move_modules_above_elf_kernel(loader_ctx *lctx, elf_header_t *kernel_image)
+static bool move_modules_above_elf_kernel(  loader_ctx      *lctx,
+                                            elf_header_t    *kernel_image)
 {
+    void *elf_start, *elf_end;
+    uint32_t ld_floor, ld_ceiling;
+
+    uint32_t module_count, mod_i, mods_remaining;
+    module_t *m;
+
     if (LOADER_CTX_BAD(lctx))
         return false;
 
     /* get end address of loaded elf image */
-    void *elf_start=NULL, *elf_end=NULL;
-    if ( !get_elf_image_range(kernel_image, &elf_start, &elf_end) )
-    {
-        printk(TBOOT_INFO"ERROR: failed tget elf image range\n");
+    if ( !get_elf_image_range(kernel_image, &elf_start, &elf_end) ){
+        printk(TBOOT_INFO"ERROR: failed to get elf image range\n");
+        return false;
     }
-
     printk(TBOOT_INFO"ELF kernel top is at 0x%X\n", (uint32_t)elf_end);
 
-    uint32_t target_addr = (uint32_t)elf_end;
-    
-    /* stay above tboot if elf kernel is loaded below tboot */
-    if ( target_addr < get_tboot_mem_end() )
-        target_addr = get_tboot_mem_end();
-
-    /* keep modules page aligned */
-    target_addr = PAGE_UP(target_addr);
-   
-    uint32_t module_count = get_module_count(lctx);
-
-    for ( unsigned int i = 0; i < module_count; i++ )
-    {
-        unsigned long base, size;
-        module_t *m = get_module(lctx,i);
-        base = m->mod_start;
-        size = m->mod_end - m->mod_start;
-        printk(TBOOT_INFO"moving module %u (%lu bytes) from 0x%08X ", i, size, (uint32_t)base);
-
-        //calculate target addresses
-        printk(TBOOT_INFO"to 0x%08X\n", (uint32_t)target_addr);
-
-        memcpy((void *)target_addr, (void *)base, size);
-        m->mod_start = target_addr;
-        m->mod_end = target_addr + size;
-
-        target_addr = PAGE_UP(target_addr + size);
+    /*  compute the lowest base address of all the modules: the ld ceiling */
+    module_count = get_module_count(lctx);
+    for( mod_i=0, ld_ceiling=0; mod_i < module_count; mod_i++ ){
+        m = get_module(lctx,mod_i);
+        ld_ceiling = (ld_ceiling < m->mod_start)? m->mod_start : ld_ceiling;
     }
 
+    /*  set ld_floor to the highest of tboot end address or the ELF-image
+        end address, and then page align */
+    ld_floor = get_tboot_mem_end();
+    ld_floor = (ld_floor < (uint32_t)elf_end)? (uint32_t)elf_end : ld_floor;
+    ld_floor = PAGE_UP(ld_floor);
+
+    /*  Ensures all modules are above ld_floor: only move mods down, never up.
+        Failing this check is an indication ELF-loading may have corrupted one
+        of the modules. */
+    if( (uint32_t)ld_floor > ld_ceiling ){
+        printk( TBOOT_INFO"Load floor (0x%08X) > load ceiling (0x%08X)\n",
+                ld_floor, ld_ceiling);
+        return false;
+    }
+
+    /*  the i-th iteration of this loop will
+    move the i-th lowest module in memory to ld_floor
+    and raise ld_floor to the new end address of the i-th lowest module */
+    for( mods_remaining = module_count; mods_remaining > 0; mods_remaining--){
+        uint32_t    lowest_mod_i = 0,
+                    lowest_mod_base = 0,
+                    lowest_mod_end = 0;
+        bool mod_found = false;
+        /* find the lowest module above the floor */
+        for( mod_i=0; mod_i<module_count; mod_i++){
+            m = get_module(lctx, mod_i);
+            if(m->mod_start >= ld_floor){
+                if( (m->mod_start < lowest_mod_base) || !mod_found  ){
+                    lowest_mod_i   = mod_i;
+                    lowest_mod_base= m->mod_start;
+                    lowest_mod_end = m->mod_end;
+                    mod_found = true;
+                }
+            }
+        }
+        m = get_module(lctx, lowest_mod_i);
+
+        /* only move the lowest module if not already at the floor */
+        if(lowest_mod_base > ld_floor){
+            uint32_t size = lowest_mod_end - lowest_mod_base;
+            uint32_t lowest_mod_newbase = ld_floor; /* already page aligned */
+            printk(TBOOT_INFO"moving module %u (%u B) from 0x%08X to 0x%08X\n",
+                    lowest_mod_i, size, lowest_mod_base, lowest_mod_newbase);
+            tb_memcpy((void *)lowest_mod_newbase, (void *)lowest_mod_base, size);
+            m->mod_start= lowest_mod_newbase;
+            m->mod_end  = lowest_mod_newbase+size;
+        }
+        /* raise the floor to the end address of the lowest module */
+        ld_floor = PAGE_UP(m->mod_end);
+    }
     return true;
 }
 
@@ -1036,7 +1106,7 @@ move_modules(loader_ctx *lctx)
     if ( to < get_loader_ctx_end(lctx) )
         to = get_loader_ctx_end(lctx);
 
-    memcpy((void *)to, (void *)from, TBOOT_BASE_ADDR - from);
+    tb_memcpy((void *)to, (void *)from, TBOOT_BASE_ADDR - from);
     
     printk(TBOOT_DETA"0x%lx bytes copied from 0x%lx to 0x%lx\n",
            TBOOT_BASE_ADDR - from, from, to);
@@ -1293,18 +1363,32 @@ bool launch_kernel(bool is_measured_launch)
 
     void *kernel_entry_point;
     uint32_t mb_type = MB_NONE;
-
+    struct tpm_if *tpm = get_tpm();
 
     if (g_tpm_family != TPM_IF_20_CRB ) {
-        if (!release_locality(g_tpm->cur_loc))
-            printk(TBOOT_ERR"Release TPM FIFO locality %d failed \n", g_tpm->cur_loc);
+        if (!release_locality(tpm->cur_loc))
+            printk(TBOOT_ERR"Release TPM FIFO locality %d failed \n", tpm->cur_loc);
     }
     else {
-        if (!tpm_relinquish_locality_crb(g_tpm->cur_loc))
-            printk(TBOOT_ERR"Relinquish TPM CRB locality %d failed \n", g_tpm->cur_loc);
+        if (!tpm_relinquish_locality_crb(tpm->cur_loc))
+            printk(TBOOT_ERR"Relinquish TPM CRB locality %d failed \n", tpm->cur_loc);
         if (!tpm_workaround_crb())
             printk(TBOOT_ERR"CRB workaround failed \n");
     }
+
+    /* if using memory logging, reserve log area */
+    if ( g_log_targets & TBOOT_LOG_TARGET_MEMORY ) {
+        uint64_t base = TBOOT_SERIAL_LOG_ADDR;
+        uint64_t size = TBOOT_SERIAL_LOG_SIZE;
+        printk(TBOOT_INFO"reserving tboot memory log (%Lx - %Lx) in e820 table\n", base, (base + size - 1));
+        if ( !e820_protect_region(base, size, E820_RESERVED) )
+            apply_policy(TB_ERR_FATAL);
+    }
+
+    /* replace map in loader context with copy */
+    replace_e820_map(g_ldr_ctx);
+    printk(TBOOT_DETA"adjusted e820 map:\n");
+    print_e820_map();
 
     if ( !verify_loader_context(g_ldr_ctx) )
         return false;
@@ -1445,7 +1529,7 @@ find_module_by_file_signature(loader_ctx *lctx, void **base,
                               size_t *size, const char* file_signature)
 {
     return find_module(lctx, base, size, 
-                       file_signature, strlen(file_signature));
+                       file_signature, tb_strlen(file_signature));
 }
 
 bool 
@@ -1791,6 +1875,10 @@ replace_e820_map(loader_ctx *lctx)
              */
             new = get_e820_copy();
             old = get_loader_memmap(lctx);
+            if ( old == NULL ) {
+                printk(TBOOT_ERR"old memory map not found\n");
+                return;
+            }
             for (i = 0; i < (get_nr_map()); i++){
                 *old = *new;
                 old++, new++;
@@ -1897,6 +1985,30 @@ get_loader_efi_ptr(loader_ctx *lctx, uint32_t *address, uint64_t *long_address)
         return true;
     }
     return false;
+}
+
+
+uint32_t
+find_efi_memmap(loader_ctx *lctx, uint32_t *descr_size,
+                uint32_t *descr_vers, uint32_t *mmap_size) {
+    struct mb2_tag *start = NULL, *hit = NULL;
+    struct mb2_tag_efi_mmap *efi_mmap = NULL;
+
+    start = (struct mb2_tag *)(lctx->addr + 8);
+    hit = find_mb2_tag_type(start, MB2_TAG_TYPE_EFI_MMAP);
+    if (hit == NULL) {
+       return 0;
+    }
+
+    efi_mmap = (struct mb2_tag_efi_mmap *)hit;
+    *descr_size = efi_mmap->descr_size;
+    *descr_vers = efi_mmap->descr_vers;
+    *mmap_size = efi_mmap->size - sizeof(struct mb2_tag_efi_mmap);
+    if (*mmap_size % *descr_size) {
+        printk(TBOOT_WARN "EFI memmmap (0x%x) should be a multiple of descriptor size (0x%x)\n",
+	       *mmap_size, *descr_size);
+    }
+    return (uint32_t)(&efi_mmap->efi_mmap);
 }
 
 bool

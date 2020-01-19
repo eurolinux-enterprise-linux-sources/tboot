@@ -244,7 +244,7 @@ static bool tpm12_pcr_read(struct tpm_if *ti, uint32_t locality,
 
     if ( out_size > sizeof(*out) )
         out_size = sizeof(*out);
-    memcpy((void *)out, WRAPPER_OUT_BUF, out_size);
+    tb_memcpy((void *)out, WRAPPER_OUT_BUF, out_size);
 
 #ifdef TPM_TRACE
     {
@@ -277,7 +277,7 @@ static bool _tpm12_pcr_extend(struct tpm_if *ti, uint32_t locality,
     /* copy pcr into buf in reversed byte order, then copy in data */
     reverse_copy(WRAPPER_IN_BUF, &pcr, sizeof(pcr));
     in_size += sizeof(pcr);
-    memcpy(WRAPPER_IN_BUF + in_size, (void *)in, sizeof(*(tpm12_digest_t *)in));
+    tb_memcpy(WRAPPER_IN_BUF + in_size, (void *)in, sizeof(*(tpm12_digest_t *)in));
     in_size += sizeof(*(tpm12_digest_t *)in);
 
     ret = tpm12_submit_cmd(locality, TPM_ORD_PCR_EXTEND, in_size, &out_size);
@@ -293,7 +293,7 @@ static bool _tpm12_pcr_extend(struct tpm_if *ti, uint32_t locality,
 
     if ( out != NULL && out_size > 0 ) {
        out_size = (out_size > sizeof(*out)) ? sizeof(*out) : out_size;
-       memcpy((void *)out, WRAPPER_OUT_BUF, out_size);
+       tb_memcpy((void *)out, WRAPPER_OUT_BUF, out_size);
     }
 
 #ifdef TPM_TRACE
@@ -353,7 +353,7 @@ static bool tpm12_pcr_reset(struct tpm_if *ti, uint32_t locality, uint32_t pcr)
     pcr_sel.pcr_select[pcr / 8] = 1 << (pcr % 8);
 
     in_size = sizeof(pcr_sel);
-    memcpy(WRAPPER_IN_BUF, (void *)&pcr_sel, in_size);
+    tb_memcpy(WRAPPER_IN_BUF, (void *)&pcr_sel, in_size);
 
     ret = tpm12_submit_cmd(locality, TPM_ORD_PCR_RESET, in_size, &out_size);
     if ( ret != TPM_SUCCESS ) {
@@ -421,7 +421,7 @@ static bool tpm12_nv_read_value(struct tpm_if *ti, uint32_t locality,
     reverse_copy(data_size, WRAPPER_OUT_BUF, sizeof(*data_size));
     *data_size = (*data_size > out_size) ? out_size : *data_size;
     if( *data_size > 0 )
-        memcpy(data, WRAPPER_OUT_BUF + sizeof(*data_size), *data_size);
+        tb_memcpy(data, WRAPPER_OUT_BUF + sizeof(*data_size), *data_size);
 
     return true;
 }
@@ -449,7 +449,7 @@ static bool tpm12_nv_write_value(struct tpm_if *ti, uint32_t locality,
     in_size += sizeof(offset);
     reverse_copy(WRAPPER_IN_BUF + in_size, &data_size, sizeof(data_size));
     in_size += sizeof(data_size);
-    memcpy(WRAPPER_IN_BUF + in_size, data, data_size);
+    tb_memcpy(WRAPPER_IN_BUF + in_size, data, data_size);
     in_size += data_size;
 
     ret = tpm12_submit_cmd(locality, TPM_ORD_NV_WRITE_VALUE,
@@ -575,7 +575,7 @@ typedef struct __packed {
 }
 
 #define UNLOAD_BLOB(buf, offset, blob, size) {\
-    memcpy(buf + offset, blob, size);\
+    tb_memcpy(buf + offset, blob, size);\
     offset += size;\
 }
 
@@ -626,49 +626,103 @@ typedef struct __packed {
 }
 
 #define LOAD_BLOB(buf, offset, blob, size) {\
-    memcpy(blob, buf + offset, size);\
+    tb_memcpy(blob, buf + offset, size);\
     offset += size;\
 }
 
 #define LOAD_BLOB_TYPE(buf, offset, blob) \
     LOAD_BLOB(buf, offset, blob, sizeof(*(blob)))
 
-#define LOAD_PCR_SELECTION(buf, offset, sel) {\
+#define LOAD_PCR_SELECTION(buf, offset, sel, size) while (1) {\
+    if ( size < sizeof(tpm_pcr_selection_t) ) {\
+        size++;\
+        break;\
+    }\
     LOAD_INTEGER(buf, offset, (sel)->size_of_select);\
+    if ( (sel)->size_of_select > sizeof((sel)->pcr_select) ) {\
+        size++;\
+        break;\
+    }\
     LOAD_BLOB(buf, offset, (sel)->pcr_select, (sel)->size_of_select);\
+    size = sizeof(tpm_pcr_selection_t);\
+    break;\
 }
 
-#define LOAD_PCR_INFO_LONG(buf, offset, info) {\
+#define LOAD_PCR_INFO_LONG(buf, offset, info, size) while (1) {\
+    uint32_t ps_size = sizeof(tpm_pcr_selection_t);\
+    if ( size < sizeof(tpm_pcr_info_long_t) ) {\
+        size++;\
+        break;\
+    }\
     LOAD_INTEGER(buf, offset, (info)->tag);\
     LOAD_BLOB_TYPE(buf, offset, &(info)->locality_at_creation);\
     LOAD_BLOB_TYPE(buf, offset, &(info)->locality_at_release);\
-    LOAD_PCR_SELECTION(buf, offset, &(info)->creation_pcr_selection);\
-    LOAD_PCR_SELECTION(buf, offset, &(info)->release_pcr_selection);\
+    LOAD_PCR_SELECTION(buf, offset, &(info)->creation_pcr_selection, ps_size);\
+    if ( ps_size > sizeof(tpm_pcr_selection_t) ) {\
+        size++;\
+        break;\
+    }\
+    ps_size = sizeof(tpm_pcr_selection_t);\
+    LOAD_PCR_SELECTION(buf, offset, &(info)->release_pcr_selection, ps_size);\
+    if ( ps_size > sizeof(tpm_pcr_selection_t) ) {\
+        size++;\
+        break;\
+    }\
     LOAD_BLOB_TYPE(buf, offset, &(info)->digest_at_creation);\
     LOAD_BLOB_TYPE(buf, offset, &(info)->digest_at_release);\
+    size=sizeof(tpm_pcr_info_long_t);\
+    break;\
 }
 
-#define LOAD_STORED_DATA12(buf, offset, hdr) {\
-   LOAD_INTEGER(buf, offset, ((tpm_stored_data12_header_t *)(hdr))->tag);\
-   LOAD_INTEGER(buf, offset, ((tpm_stored_data12_header_t *)(hdr))->et);\
-   LOAD_INTEGER(buf, offset, \
-                ((tpm_stored_data12_header_t *)(hdr))->seal_info_size);\
-   if ( ((tpm_stored_data12_header_t *)(hdr))->seal_info_size == 0 ) {\
-       LOAD_INTEGER(buf, offset,\
-                    ((tpm_stored_data12_short_t *)hdr)->enc_data_size);\
-       LOAD_BLOB(buf, offset,\
-                 ((tpm_stored_data12_short_t *)hdr)->enc_data,\
-                 ((tpm_stored_data12_short_t *)hdr)->enc_data_size);\
-   }\
-   else {\
-       LOAD_PCR_INFO_LONG(buf, offset,\
-                          &((tpm_stored_data12_t *)hdr)->seal_info);\
-       LOAD_INTEGER(buf, offset,\
-                    ((tpm_stored_data12_t *)hdr)->enc_data_size);\
-       LOAD_BLOB(buf, offset,\
-                 ((tpm_stored_data12_t *)hdr)->enc_data,\
-                 ((tpm_stored_data12_t *)hdr)->enc_data_size);\
-   }\
+#define LOAD_STORED_DATA12(buf, offset, hdr, size) while (1){\
+    uint32_t pil_size = sizeof(tpm_pcr_info_long_t);\
+    if ( size < sizeof(tpm_stored_data12_short_t) ) {\
+        size++;\
+        break;\
+    }\
+    LOAD_INTEGER(buf, offset, ((tpm_stored_data12_header_t *)(hdr))->tag);\
+    LOAD_INTEGER(buf, offset, ((tpm_stored_data12_header_t *)(hdr))->et);\
+    LOAD_INTEGER(buf, offset, \
+                 ((tpm_stored_data12_header_t *)(hdr))->seal_info_size);\
+    if ( ((tpm_stored_data12_header_t *)(hdr))->seal_info_size == 0 ) {\
+        LOAD_INTEGER(buf, offset,\
+                     ((tpm_stored_data12_short_t *)hdr)->enc_data_size);\
+        if ( size - sizeof(tpm_stored_data12_short_t) <\
+                    ((tpm_stored_data12_short_t *)hdr)->enc_data_size ) {\
+            size++;\
+            break;\
+        }\
+        LOAD_BLOB(buf, offset,\
+                  ((tpm_stored_data12_short_t *)hdr)->enc_data,\
+                  ((tpm_stored_data12_short_t *)hdr)->enc_data_size);\
+        size = sizeof(tpm_stored_data12_short_t) +\
+               ((tpm_stored_data12_short_t *)hdr)->enc_data_size;\
+    }\
+    else {\
+        if ( size < sizeof(tpm_stored_data12_t) ) {\
+            size++;\
+            break;\
+        }\
+        LOAD_PCR_INFO_LONG(buf, offset,\
+                           &((tpm_stored_data12_t *)hdr)->seal_info, pil_size);\
+        if ( pil_size > sizeof(tpm_pcr_info_long_t) ) {\
+            size++;\
+            break;\
+        }\
+        LOAD_INTEGER(buf, offset,\
+                     ((tpm_stored_data12_t *)hdr)->enc_data_size);\
+        if ( size - sizeof(tpm_stored_data12_t) <\
+                    ((tpm_stored_data12_t *)hdr)->enc_data_size ) {\
+            size++;\
+            break;\
+        }\
+        LOAD_BLOB(buf, offset,\
+                  ((tpm_stored_data12_t *)hdr)->enc_data,\
+                  ((tpm_stored_data12_t *)hdr)->enc_data_size);\
+        size = sizeof(tpm_stored_data12_t) +\
+               ((tpm_stored_data12_t *)hdr)->enc_data_size;\
+    }\
+    break;\
 }
 
 static uint32_t tpm12_oiap(uint32_t locality, tpm_authhandle_t *hauth,
@@ -758,7 +812,7 @@ static uint32_t _tpm12_seal(uint32_t locality, tpm_key_handle_t hkey,
                   uint32_t *sealed_data_size, uint8_t *sealed_data,
                   tpm_nonce_t *nonce_even, tpm_authdata_t *res_auth)
 {
-    uint32_t ret, offset, out_size;
+    uint32_t ret, offset, out_size, size;
 
     if ( enc_auth == NULL || pcr_info == NULL || in_data == NULL ||
          nonce_odd == NULL || cont_session == NULL || pub_auth == NULL ||
@@ -808,8 +862,13 @@ static uint32_t _tpm12_seal(uint32_t locality, tpm_key_handle_t hkey,
     }
 
     offset = 0;
-    LOAD_STORED_DATA12(WRAPPER_OUT_BUF, offset, sealed_data);
-    *sealed_data_size = offset;
+    size = *sealed_data_size;
+    LOAD_STORED_DATA12(WRAPPER_OUT_BUF, offset, sealed_data, size);
+    if ( *sealed_data_size < size ) {
+        printk(TBOOT_WARN"TPM: sealed blob is too small\n");
+        return TPM_NOSPACE;
+    }
+    *sealed_data_size = size;
     LOAD_BLOB_TYPE(WRAPPER_OUT_BUF, offset, nonce_even);
     LOAD_INTEGER(WRAPPER_OUT_BUF, offset, *cont_session);
     LOAD_BLOB_TYPE(WRAPPER_OUT_BUF, offset, res_auth);
@@ -827,7 +886,7 @@ static uint32_t _tpm12_unseal(uint32_t locality, tpm_key_handle_t hkey,
                     tpm_nonce_t *nonce_even, tpm_authdata_t *res_auth,
                     tpm_nonce_t *nonce_even_d, tpm_authdata_t *res_auth_d)
 {
-    uint32_t ret, offset, out_size;
+    uint32_t ret, offset, out_size, size;
 
     if ( in_data == NULL || nonce_odd == NULL || cont_session == NULL ||
          auth == NULL || nonce_odd_d == NULL || cont_session_d == NULL ||
@@ -871,16 +930,17 @@ static uint32_t _tpm12_unseal(uint32_t locality, tpm_key_handle_t hkey,
     }
 #endif
 
-    if ( *secret_size <
+    offset = 0;
+    LOAD_INTEGER(WRAPPER_OUT_BUF, offset, size);
+    if ( *secret_size < size ||
+         size != 
          ( out_size - sizeof(*secret_size) - sizeof(*nonce_even)
            - sizeof(*cont_session) - sizeof(*res_auth) - sizeof(*nonce_even_d)
            - sizeof(*cont_session_d) - sizeof(*res_auth_d) ) ) {
         printk(TBOOT_WARN"TPM: unsealed data too small\n");
         return TPM_NOSPACE;
     }
-
-    offset = 0;
-    LOAD_INTEGER(WRAPPER_OUT_BUF, offset, *secret_size);
+    *secret_size = size;
     LOAD_BLOB(WRAPPER_OUT_BUF, offset, secret, *secret_size);
 
     LOAD_BLOB_TYPE(WRAPPER_OUT_BUF, offset, nonce_even);
@@ -943,7 +1003,7 @@ static uint32_t _tpm12_wrap_seal(uint32_t locality,
     UNLOAD_BLOB_TYPE(WRAPPER_IN_BUF, offset, &shared_secret);
     UNLOAD_BLOB_TYPE(WRAPPER_IN_BUF, offset, &nonce_even);
     sha1_buffer(WRAPPER_IN_BUF, offset, (uint8_t *)&digest);
-    memcpy(&enc_auth, &blob_authdata, sizeof(blob_authdata));
+    tb_memcpy(&enc_auth, &blob_authdata, sizeof(blob_authdata));
     XOR_BLOB_TYPE(&enc_auth, &digest);
 
     /* skip generate nonce for nonce_odd, just use the random value in stack */
@@ -1090,7 +1150,7 @@ static bool init_pcr_info(uint32_t locality,
             return false;
     }
 
-    memset(pcr_info, 0, sizeof(*pcr_info));
+    tb_memset(pcr_info, 0, sizeof(*pcr_info));
     pcr_info->tag = TPM_TAG_PCR_INFO_LONG;
     pcr_info->locality_at_creation = localities[locality];
     pcr_info->locality_at_release = release_locs;
@@ -1280,7 +1340,7 @@ static bool tpm12_cmp_creation_pcrs(uint32_t pcr_nr_create,
     cre_composite = get_cre_pcr_composite(sealed_data);
     if ( cre_composite == NULL )
         return false;
-    if ( memcmp(&composite, cre_composite, sizeof(composite)) ) {
+    if ( tb_memcmp(&composite, cre_composite, sizeof(composite)) ) {
         printk(TBOOT_WARN"TPM: Not equal to creation composition:\n");
         print_hex(NULL, (uint8_t *)&composite, sizeof(composite));
         print_hex(NULL, (uint8_t *)cre_composite, sizeof(composite));
@@ -1335,7 +1395,7 @@ static uint32_t tpm12_get_capability(uint32_t locality, tpm_capability_area_t ca
                   uint32_t sub_cap_size, const uint8_t *sub_cap,
                   uint32_t *resp_size, uint8_t *resp)
 {
-    uint32_t ret, offset, out_size;
+    uint32_t ret, offset, out_size, size;
 
     if ( sub_cap == NULL || resp_size == NULL || resp == NULL ) {
         printk(TBOOT_WARN"TPM: tpm12_get_capability() bad parameter\n");
@@ -1360,11 +1420,13 @@ static uint32_t tpm12_get_capability(uint32_t locality, tpm_capability_area_t ca
     }
 
     offset = 0;
-    LOAD_INTEGER(WRAPPER_OUT_BUF, offset, *resp_size);
-    if ( out_size < sizeof(*resp_size) + *resp_size ) {
+    LOAD_INTEGER(WRAPPER_OUT_BUF, offset, size);
+    if ( *resp_size < size ||
+         size != out_size - sizeof(*resp_size) ) {
         printk(TBOOT_WARN"TPM: capability response too small\n");
         return TPM_FAIL;
     }
+    *resp_size = size;
     LOAD_BLOB(WRAPPER_OUT_BUF, offset, resp, *resp_size);
 
     return ret;
@@ -1671,6 +1733,11 @@ static bool tpm12_init(struct tpm_if *ti)
     if ( ti == NULL )
         return false;
 
+    if (!txt_is_launched())
+        ti->cur_loc = 0;
+    else
+        ti->cur_loc = 2;
+
     locality = ti->cur_loc;
     if ( !tpm_validate_locality(locality) ) {
         printk(TBOOT_WARN"TPM is not available.\n");
@@ -1678,7 +1745,7 @@ static bool tpm12_init(struct tpm_if *ti)
     }
 
     /* make sure tpm is not disabled/deactivated */
-    memset(&pflags, 0, sizeof(pflags));
+    tb_memset(&pflags, 0, sizeof(pflags));
     ret = tpm12_get_flags(locality, TPM_CAP_FLAG_PERMANENT,
                         (uint8_t *)&pflags, sizeof(pflags));
     if ( ret != TPM_SUCCESS ) {
@@ -1691,7 +1758,7 @@ static bool tpm12_init(struct tpm_if *ti)
         return false;
     }
 
-    memset(&vflags, 0, sizeof(vflags));
+    tb_memset(&vflags, 0, sizeof(vflags));
     ret = tpm12_get_flags(locality, TPM_CAP_FLAG_VOLATILE,
                         (uint8_t *)&vflags, sizeof(vflags));
     if ( ret != TPM_SUCCESS ) {
@@ -1848,11 +1915,16 @@ static bool tpm12_get_random(struct tpm_if *ti, uint32_t locality,
 
     out_size -= sizeof(*data_size);
     reverse_copy(data_size, WRAPPER_OUT_BUF, sizeof(*data_size));
+    if ( *data_size > requested_size ) {
+        printk(TBOOT_WARN"Requeseted %x random bytes but got %x\n", requested_size, *data_size);
+        ti->error = TPM_NOSPACE;
+        return false;
+    }
     if ( *data_size > 0 )
-        memcpy(random_data, WRAPPER_OUT_BUF + sizeof(*data_size), *data_size);
+        tb_memcpy(random_data, WRAPPER_OUT_BUF + sizeof(*data_size), *data_size);
 
     /* data might be used as key, so clear from buffer memory */
-    memset(WRAPPER_OUT_BUF + sizeof(*data_size), 0, *data_size);
+    tb_memset(WRAPPER_OUT_BUF + sizeof(*data_size), 0, *data_size);
 
     /* if TPM doesn't return all requested random bytes, try one more time */
     if ( *data_size < requested_size ) {
@@ -1894,7 +1966,7 @@ static bool tpm12_cap_pcrs(struct tpm_if *ti, u32 locality, int pcr)
 
     /* also cap every dynamic PCR we extended (only once) */
     /* don't cap static PCRs since then they would be wrong after S3 resume */
-    memset(&was_capped, true, TPM_PCR_RESETABLE_MIN*sizeof(bool));
+    tb_memset(&was_capped, true, TPM_PCR_RESETABLE_MIN*sizeof(bool));
     for ( int i = 0; i < g_pre_k_s3_state.num_vl_entries; i++ ) {
         if ( !was_capped[g_pre_k_s3_state.vl_entries[i].pcr] ) {
             _tpm12_pcr_extend(ti, locality, g_pre_k_s3_state.vl_entries[i].pcr, &cap_val);
@@ -1914,8 +1986,7 @@ static bool tpm12_check(void)
 
     return ( ret == TPM_BAD_ORDINAL );
 }
-
-struct tpm_if tpm_12_if = {
+const struct tpm_if_fp tpm_12_if_fp = {
     .init = tpm12_init,
     .pcr_read = tpm12_pcr_read,
     .pcr_extend = tpm12_pcr_extend,
@@ -1931,11 +2002,6 @@ struct tpm_if tpm_12_if = {
     .save_state = tpm12_save_state,
     .cap_pcrs = tpm12_cap_pcrs,
     .check = tpm12_check,
-    .cur_loc = 0,
-    .timeout.timeout_a = TIMEOUT_A,
-    .timeout.timeout_b = TIMEOUT_B,
-    .timeout.timeout_c = TIMEOUT_C,
-    .timeout.timeout_d = TIMEOUT_D,
 };
 
 /*

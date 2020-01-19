@@ -49,6 +49,7 @@
 #include <openssl/bn.h>
 #include <openssl/ecdsa.h>
 #include <openssl/ec.h>
+#include <safe_lib.h>
 #define PRINT   printf
 #include "../include/config.h"
 #include "../include/hash.h"
@@ -141,6 +142,7 @@ static lcp_signature_t2 *read_rsa_pubkey_file(const char *file)
         ERROR("Error: failed to read .pem file %s: %s\n", file,
                 ERR_error_string(ERR_get_error(), NULL));
         ERR_free_strings();
+        fclose(fp);
         return NULL;
     }
 
@@ -148,6 +150,7 @@ static lcp_signature_t2 *read_rsa_pubkey_file(const char *file)
     if ( keysize == 0 ) {
         ERROR("Error: public key size is 0\n");
         RSA_free(pubkey);
+        fclose(fp);
         return NULL;
     }
 
@@ -155,19 +158,23 @@ static lcp_signature_t2 *read_rsa_pubkey_file(const char *file)
     if ( sig == NULL ) {
         ERROR("Error: failed to allocate sig\n");
         RSA_free(pubkey);
+        fclose(fp);
         return NULL;
     }
-
-    memset(sig, 0, sizeof(lcp_rsa_signature_t) + 2*keysize);
+    const BIGNUM *modulus = NULL;
+    memset_s(sig, sizeof(lcp_rsa_signature_t) + 2*keysize, 0);
     sig->rsa_signature.pubkey_size = keysize;
-    if ( (unsigned int)BN_num_bytes(pubkey->n) != keysize ) {
-        ERROR("Error: modulus size not match key size\n");
-        free(sig);
-        RSA_free(pubkey);
-        return NULL;
-    }
+
+    /* OpenSSL Version 1.1.0 and later don't allow direct access to RSA 
+       stuct */    
+    #if OPENSSL_VERSION_NUMBER >= 0x10100000L
+        RSA_get0_key(pubkey, &modulus, NULL, NULL);
+    #else
+        modulus = pubkey->n;
+    #endif
+
     unsigned char key[keysize];
-    BN_bn2bin(pubkey->n, key);
+    BN_bn2bin(modulus, key);
     /* openssl key is big-endian and policy requires little-endian, so reverse
        bytes */
     for ( unsigned int i = 0; i < keysize; i++ )
@@ -180,6 +187,7 @@ static lcp_signature_t2 *read_rsa_pubkey_file(const char *file)
 
     LOG("read rsa pubkey succeed!\n");
     RSA_free(pubkey);
+    fclose(fp);
     return sig;
 }
 
@@ -199,7 +207,7 @@ static lcp_signature_t2 *read_ecdsa_pubkey(const EC_POINT *pubkey, const EC_GROU
         return NULL;
     }
 
-    memset(sig, 0, sizeof(lcp_ecc_signature_t) + 2*keysize);
+    memset_s(sig, sizeof(lcp_ecc_signature_t) + 2*keysize, 0);
     sig->ecc_signature.pubkey_size = keysize;
     unsigned int BN_X_size = BN_num_bytes(x);
     unsigned int BN_Y_size = BN_num_bytes(y); 
@@ -245,6 +253,7 @@ static bool rsa_sign_list_data(lcp_policy_list_t2 *pollist, const char *privkey_
         }   
 
         RSA *privkey = PEM_read_RSAPrivateKey(fp, NULL, NULL, NULL);
+        fclose(fp);
         if ( privkey == NULL ) {
             ERR_load_crypto_strings();
             ERROR("Error: failed to read .pem file %s: %s\n", privkey_file,
@@ -332,9 +341,15 @@ static bool rsa_sign_list_data(lcp_policy_list_t2 *pollist, const char *privkey_
 
         RSA_free(privkey);
 
+        uint8_t *plsigblock = get_tpm20_sig_block(pollist);
+        if ( plsigblock == NULL ) {
+            ERROR("Error: list sig block not found\n");
+            return false;
+        }
+
         /* sigblock is big-endian and policy needs little-endian, so reverse */
         for ( unsigned int i = 0; i < sig->rsa_signature.pubkey_size; i++ )
-            *(get_tpm20_sig_block(pollist) + i) = *(sigblock + (sig->rsa_signature.pubkey_size - i - 1));
+            *(plsigblock + i) = *(sigblock + (sig->rsa_signature.pubkey_size - i - 1));
 
         if ( verbose ) {
             LOG("signature:\n");
@@ -381,28 +396,43 @@ static bool ecdsa_sign_tpm20_list_data(lcp_policy_list_t2 *pollist, EC_KEY *ecke
             return false;
         }
 
-        BIGNUM *r = BN_new();
-        BIGNUM *s = BN_new();
-        r = ecdsasig->r;
-        s = ecdsasig->s;
-        unsigned int BN_r_size = BN_num_bytes(r);
+        const BIGNUM *r = NULL;
+        const BIGNUM *s = NULL; 
+
+	/* OpenSSL Version 1.1.0 and later don't allow direct access to 
+	   ECDSA_SIG stuct */ 
+        #if OPENSSL_VERSION_NUMBER >= 0x10100000L
+            ECDSA_SIG_get0(ecdsasig, &r, &s);
+        #else
+    	    r = ecdsasig->r;
+    	    s = ecdsasig->s;
+        #endif
+	unsigned int BN_r_size = BN_num_bytes(r);
         unsigned int BN_s_size = BN_num_bytes(s); 
         unsigned char key_r[BN_r_size];
         unsigned char key_s[BN_s_size];
         BN_bn2bin(r,key_r);
         BN_bn2bin(s,key_s);
+
+        uint8_t *plsigblock = get_tpm20_sig_block(pollist);
+        if ( plsigblock == NULL ) {
+            ERROR("Error: list sig block not found\n");
+            return false;
+        }
+
         for ( unsigned int i = 0; i < BN_r_size; i++ ) {
-            *(get_tpm20_sig_block(pollist) + i) = *(key_r + (BN_r_size -i - 1));
+            *(plsigblock + i) = *(key_r + (BN_r_size -i - 1));
         }
 
         for ( unsigned int i = 0; i < BN_s_size; i++ ) {
-            *(get_tpm20_sig_block(pollist) + BN_r_size + i) = *(key_s + (BN_s_size -i - 1));
+            *(plsigblock + BN_r_size + i) = *(key_s + (BN_s_size -i - 1));
         }
 
         if ( verbose ) {
             display_tpm20_signature("    ", sig, pollist->sig_alg, false);
         }
 
+        ECDSA_SIG_free(ecdsasig);
         return true;
     }
     return false;
@@ -452,9 +482,11 @@ static int sign(void)
         return 1;
 
     uint16_t  version ;
-    memcpy((void*)&version,(const void *)pollist,sizeof(uint16_t));
-    if ( version != LCP_TPM20_POLICY_LIST_VERSION )
+    memcpy_s((void*)&version, sizeof(uint16_t), (const void *)pollist, sizeof(uint16_t));
+    if ( version != LCP_TPM20_POLICY_LIST_VERSION ) {
+        free(pollist);
         return 1;
+    }
 
     pollist->tpm20_policy_list.sig_alg = sigalg_type;
     LOG("sign: version==0x0200,sig_alg=0x%x\n",pollist->tpm20_policy_list.sig_alg);
@@ -485,8 +517,14 @@ static int sign(void)
         }
 
         if ( no_sigblock ) {
-            memset(get_tpm20_sig_block(&(pollist->tpm20_policy_list)),
-                           0, sig->rsa_signature.pubkey_size);
+            unsigned char *sigblock = get_tpm20_sig_block(&(pollist->tpm20_policy_list));
+            if ( sigblock == NULL ) {
+                ERROR("Error: failed to get signature block\n");
+                free(sig);
+                free(pollist);
+                return 1;
+            }
+            memset_s(sigblock, sig->rsa_signature.pubkey_size, 0);
         }
         else {
             if ( !rsa_sign_list_data(&(pollist->tpm20_policy_list), privkey_file) ) {
@@ -511,15 +549,22 @@ static int sign(void)
 
         if ( !EC_KEY_generate_key(eckey) ) {
             ERROR("Error: EC_KEY_generate_key error\n");
+            free(pollist);
             return 1;
         }
         const EC_POINT *pubkey = EC_KEY_get0_public_key(eckey);
         if( pubkey == NULL) {
             ERROR("Error: EC_KEY_get0_public_key error\n");
+            free(pollist);
             return 1;
         }
 
         lcp_signature_t2 *sig = read_ecdsa_pubkey(pubkey, ecgroup);
+        if ( sig == NULL ) {
+            ERROR("Error: read_ecdsa_pubkey error\n");
+            free(pollist);
+            return 1;
+        }
         sig->ecc_signature.revocation_counter = rev_ctr;
         pollist = (lcp_list_t *)add_tpm20_signature(&(pollist->tpm20_policy_list),
                                         sig, TPM_ALG_ECDSA);
@@ -529,8 +574,14 @@ static int sign(void)
         }
 
         if ( no_sigblock ) {
-            memset(get_tpm20_sig_block(&(pollist->tpm20_policy_list)),
-                           0, sig->ecc_signature.pubkey_size);
+            unsigned char *sigblock = get_tpm20_sig_block(&(pollist->tpm20_policy_list));
+            if ( sigblock == NULL ) {
+                ERROR("Error: failed to get signature block\n");
+                free(sig);
+                free(pollist);
+                return 1;
+            }
+            memset_s(sigblock, sig->ecc_signature.pubkey_size, 0);
         }
         else {
             if ( !ecdsa_sign_tpm20_list_data(&(pollist->tpm20_policy_list), eckey) ) {
@@ -549,9 +600,11 @@ static int sign(void)
     }
     else if ( pollist->tpm20_policy_list.sig_alg == TPM_ALG_SM2 ) {
         LOG("sign: sig_alg == TPM_ALG_SM2\n");
+        free(pollist);
         return 1;
     }
 
+    free(pollist);
     return 1;
 }
 
@@ -565,7 +618,7 @@ static int addsig(void)
         return 1;
 
     uint16_t  version ;
-    memcpy((void*)&version,(const void *)pollist,sizeof(uint16_t));
+    memcpy_s((void*)&version, sizeof(uint16_t), (const void *)pollist, sizeof(uint16_t));
     if (version != LCP_TPM20_POLICY_LIST_VERSION )
         return 1;
 
@@ -613,9 +666,17 @@ static int addsig(void)
     }
     LOG("signature file verified\n");
 
+    uint8_t *plsigblock = get_tpm20_sig_block(&(pollist->tpm20_policy_list));
+    if ( plsigblock == NULL ) {
+        ERROR("Error: list sig block not found\n");
+        free(pollist);
+        free(data);
+        return 1;
+    }
+
     /* data is big-endian and policy needs little-endian, so reverse */
     for ( unsigned int i = 0; i < sig->rsa_signature.pubkey_size; i++ )
-        *(get_tpm20_sig_block(&(pollist->tpm20_policy_list)) + i) =
+        *(plsigblock + i) =
                 *(data + (sig->rsa_signature.pubkey_size - i - 1));
 
     if ( verbose ) {
@@ -642,9 +703,11 @@ static int show(void)
         return 1;
 
     uint16_t  version ;
-    memcpy((void*)&version,(const void *)pollist,sizeof(uint16_t));
-    if (version != LCP_TPM20_POLICY_LIST_VERSION )
+    memcpy_s((void*)&version, sizeof(uint16_t), (const void *)pollist, sizeof(uint16_t));
+    if (version != LCP_TPM20_POLICY_LIST_VERSION ) {
+        free(pollist);
         return 1;
+    }
 
     LOG("show: version == 0x0200\n");
     DISPLAY("policy list file: %s\n", files[0]);
@@ -658,6 +721,7 @@ static int show(void)
             DISPLAY("failed to verify signature\n");
     }
 
+    free(pollist);
     return 0;
 }
 

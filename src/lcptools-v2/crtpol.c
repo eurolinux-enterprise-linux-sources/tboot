@@ -47,6 +47,7 @@
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/bn.h>
+#include <safe_lib.h>
 #define PRINT   printf
 #include "../include/config.h"
 #include "../include/hash.h"
@@ -60,18 +61,23 @@
 #include "pollist1.h"
 
 static const char help[] =
-    "Usage: lcp_crtpol2 <COMMAND> [OPTION]\n"
+    "Usage: lcp2_crtpol <COMMAND> [OPTION]\n"
     "Create an Intel(R) TXT policy (and policy data file)\n\n"
     "--create\n"
-    "        --alg <sha1|sha256|sm3>    hash_alg\n"
+    
+    "        --alg <sha1|sha256|sm3>    hash algorithm for the policy\n"
     "        --type <any|list>          type\n"
     "        [--minver <ver>]           SINITMinVersion\n"
     "        [--rev <ctr1>[,ctrN]       revocation values (comma separated,\n"
     "                                   no spaces\n"
     "        [--ctrl <pol ctrl]         policy control\n"
     "        --pol <FILE>               policy file\n"
-    "        [--data <FILE>             policy data file\n"
+    "        [--data <FILE>]            policy data file\n"
     "        [FILE]...                  policy list files\n"
+    "        [--mask]                   Allowed policy hash algorithm(s)\n"
+    "        [--auxalg]                 AUX allowed hash algorithm(s)\n"
+    "        --sign                     LCP allowed signing algorithm(s)\n"
+    "        [--polver]                 LCP version\n"
     "--show\n"
     "        [--brief]                  brief format output\n"
     "        [policy file]              policy file\n"
@@ -99,21 +105,34 @@ static struct option long_opts[] =
     {"pol",            required_argument,    NULL,     'p'},
     {"data",           required_argument,    NULL,     'd'},
     {"brief",          no_argument,          NULL,     'b'},
+    {"mask",           required_argument,    NULL,     'k'},
+    {"auxalg",         required_argument,    NULL,     'x'},
+    {"sign",           required_argument,    NULL,     's'},
+    {"polver",         required_argument,    NULL,     'e'},
 
     {"verbose",        no_argument,          (int *)&verbose, true},
     {0, 0, 0, 0}
 };
 
-uint16_t       version = LCP_DEFAULT_POLICY_VERSION;
+uint16_t       pol_ver = LCP_DEFAULT_POLICY_VERSION;
 char           policy_file[MAX_PATH] = "";
 char           poldata_file[MAX_PATH] = "";
-char           alg_name[32] = "";
-uint16_t       alg_type = TPM_ALG_NULL;
+
+char           lcp_alg_name[32] = "";
+char           aux_alg_name[32] = "";
+char           sign_alg_name[32] = "";
+char           pol_ver_name[32] = "";
+char           lcp_hash_mask_name[32] = "";
+uint16_t       lcp_hash_alg = TPM_ALG_NULL;
+uint16_t       aux_hash_alg = TPM_ALG_MASK_NULL;
+uint16_t       lcp_hash_mask = TPM_ALG_MASK_NULL;
+ 
 char           type[32] = "";
 uint8_t        sinit_min_ver = 0;
 unsigned int   nr_rev_ctrs = 0;
 uint16_t       rev_ctrs[LCP_MAX_LISTS] = { 0 };
 uint32_t       policy_ctrl = LCP_DEFAULT_POLICY_CONTROL;
+uint32_t       lcp_sign_alg = SIGN_ALG_MASK_NULL;
 bool           brief = false;
 unsigned int   nr_files = 0;
 char           files[LCP_MAX_LISTS][MAX_PATH];
@@ -127,13 +146,28 @@ static int create(void)
         ERROR("Error: failed to allocate policy\n");
         return 1;
     }
-    memset(pol, 0, sizeof(*pol));
-    pol->version = version;
-    pol->hash_alg = alg_type;
+    memset_s(pol, sizeof(*pol), 0);
+    pol->version = pol_ver;
+    pol->hash_alg = lcp_hash_alg;
     pol->sinit_min_version = sinit_min_ver;
     for ( unsigned int i = 0; i < nr_rev_ctrs; i++ )
         pol->data_revocation_counters[i] = rev_ctrs[i];
     pol->policy_control = policy_ctrl;
+  
+    if(aux_hash_alg == TPM_ALG_MASK_NULL){
+        pol->aux_hash_alg_mask = convert_hash_alg_to_mask(pol->hash_alg);
+    }
+    else{
+        pol->aux_hash_alg_mask = aux_hash_alg;
+    }
+
+    if(lcp_hash_mask == TPM_ALG_MASK_NULL){
+        pol->lcp_hash_alg_mask = convert_hash_alg_to_mask(pol->hash_alg);
+    }
+    else{
+        pol->lcp_hash_alg_mask = lcp_hash_mask;
+    }
+    pol->lcp_sign_alg_mask = lcp_sign_alg;
 
     if ( strcmp(type, "any") == 0 ) {
         pol->policy_type = LCP_POLTYPE_ANY;
@@ -147,7 +181,7 @@ static int create(void)
             free(pol);
             return 1;
         }
-        memset(poldata, 0, sizeof(*poldata));
+        memset_s(poldata, sizeof(*poldata), 0);
         strlcpy(poldata->file_signature, LCP_POLICY_DATA_FILE_SIGNATURE,
                 sizeof(poldata->file_signature));
         poldata->num_lists = 0;
@@ -162,7 +196,7 @@ static int create(void)
                 return 1;
             }
             uint16_t version;
-            memcpy((void*)&version, (const void *)pollist, sizeof(uint16_t));
+            memcpy_s((void*)&version, sizeof(uint16_t), (const void *)pollist, sizeof(uint16_t));
             if ( version == LCP_TPM12_POLICY_LIST_VERSION )
                  poldata = add_tpm12_policy_list(poldata,
                                (lcp_policy_list_t *)pollist);
@@ -178,6 +212,13 @@ static int create(void)
         }
         calc_policy_data_hash(poldata, &pol->policy_hash, pol->hash_alg);
     }
+    else {
+        ERROR("Error: unknown policy type\n");
+        free(pol);
+        return 1;
+    }
+    
+    LOG("pol alg=0x%x, mask=0x%x, aux_mask=0x%x, sign_mask=0x%x\n", pol->hash_alg, pol->lcp_hash_alg_mask, pol->aux_hash_alg_mask, pol->lcp_sign_alg_mask);
 
     bool ok;
     ok = write_file(policy_file, pol, get_policy_size(pol));
@@ -246,9 +287,11 @@ static int show(void)
 
             if ( pol && pol->policy_type == LCP_POLTYPE_LIST ) {
                 lcp_hash_t2 hash;
+                int diff;
                 calc_policy_data_hash(poldata, &hash, pol->hash_alg);
-                if ( memcmp(&hash, &pol->policy_hash,
-                            get_lcp_hash_size(pol->hash_alg)) == 0 )
+                if ( 0 == memcmp_s(&hash, sizeof(hash), &pol->policy_hash,
+                                   get_lcp_hash_size(pol->hash_alg), &diff)
+                     && diff == 0 )
                     DISPLAY("\npolicy data hash matches policy hash\n");
                 else {
                     ERROR("\nError: policy data hash does not match policy hash\n");
@@ -280,7 +323,7 @@ int main (int argc, char *argv[])
 
     do {
         c = getopt_long_only(argc, argv, "", long_opts, NULL);
-
+        /*LOG("getopt: %c %s\n", c, optarg);*/
         switch (c) {
             /* commands */
         case 'H':          /* help */
@@ -295,12 +338,13 @@ int main (int argc, char *argv[])
             LOG("cmdline opt: command: %c\n", cmd);
             break;
 
-	case 'a':
-            strlcpy(alg_name, optarg, sizeof(alg_name));
-            LOG("cmdline opt: alg: %s\n", alg_name);
+	    case 'a':
+            strlcpy(lcp_alg_name, optarg, sizeof(lcp_alg_name));
+            lcp_hash_alg = str_to_hash_alg(lcp_alg_name);
+            LOG("cmdline opt: alg: %s\n", lcp_alg_name);
             break;
 
-        case 'p':            /* policy file */
+    	    case 'p':            /* policy file */
             strlcpy(policy_file, optarg, sizeof(policy_file));
             LOG("cmdline opt: pol: %s\n", policy_file);
             break;
@@ -339,6 +383,47 @@ int main (int argc, char *argv[])
             LOG("cmdline opt: brief: %u\n", brief);
             break;
 
+        case 'k':           /* policy hash algorithm mask */
+            strlcpy(lcp_hash_mask_name, optarg, sizeof(lcp_hash_mask_name));
+            lcp_hash_mask = str_to_lcp_hash_mask(lcp_hash_mask_name);
+            LOG("cmdline opt: mask: %s = 0x%04X\n", lcp_hash_mask_name, lcp_hash_mask);
+            if ( lcp_hash_mask == TPM_ALG_MASK_NULL ) {
+                 ERROR("Error: LCP hash alg not supported\n");
+                 return 1;
+            }
+            break;
+
+        case 'x':           /* AUX hash algorithm */
+            strlcpy(aux_alg_name, optarg, sizeof(aux_alg_name));
+            LOG("cmdline opt: auxalg: %s\n", aux_alg_name);
+            aux_hash_alg = str_to_lcp_hash_mask(aux_alg_name);
+            if ( aux_hash_alg == TPM_ALG_MASK_NULL) {
+                 ERROR("Error: AUX hash alg not supported\n");
+                 return 1;
+            }
+            break;
+
+        case 's':           /* LCP signing algorithm */
+            strlcpy(sign_alg_name, optarg, sizeof(sign_alg_name));
+            LOG("cmdline opt: sign: %s\n", sign_alg_name);
+
+            lcp_sign_alg = str_to_sig_alg_mask(sign_alg_name, pol_ver);
+            if ( lcp_sign_alg == SIGN_ALG_MASK_NULL) {
+                 ERROR("Error: signing alg not supported\n");
+                 return 1;
+            }
+            break;
+        case 'e':           /* LCP version */
+            strlcpy(pol_ver_name, optarg, sizeof(pol_ver_name));
+            LOG("cmdline opt: sign: %s\n", pol_ver_name);
+
+            pol_ver = str_to_pol_ver(pol_ver_name);
+            if ( pol_ver == LCP_VER_NULL) {
+                 ERROR("Error: Invalid policy version\n");
+                 return 1;
+            }
+            break;
+
         case 0:
         case -1:
             break;
@@ -365,11 +450,23 @@ int main (int argc, char *argv[])
         return 0;
     }
     else if ( cmd == 'C' ) {      /* --create */
-	alg_type = str_to_hash_alg(alg_name);
-        if ( alg_type == TPM_ALG_NULL) {
-             ERROR("Error: alg not supported\n");
-             return 1;
+	uint16_t lcp_major_version = pol_ver & 0xFF00;
+
+        if ( lcp_hash_alg == TPM_ALG_NULL) {
+            ERROR("Error: alg not supported\n");
+            return 1;
         }
+        LOG("pol_ver & 0xFF00 is 0x%x", lcp_major_version);
+        if ( lcp_major_version == LCP_VER_2_0 ){
+            if ( lcp_sign_alg != SIGN_ALG_MASK_NULL) {
+                LOG("Info: Signature algorithm mask not defined for LCPv2, specified mask is ignored.\n");
+            }        
+        }
+        else if ( lcp_sign_alg == SIGN_ALG_MASK_NULL) {
+            ERROR("Error: LCPv3 signing alg mask not supported or not specified\n");
+            return 1;
+        }
+
         if ( *type == '\0' ) {
             ERROR("Error: no type specified\n");
             return 1;

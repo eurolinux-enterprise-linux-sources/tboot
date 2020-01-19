@@ -61,6 +61,7 @@ typedef union {
     uint8_t    sha256[SHA256_LENGTH];
     uint8_t    sm3[SM3_LENGTH];
     uint8_t    sha384[SHA384_LENGTH];
+    uint8_t    sha512[SHA512_LENGTH];
 } tb_hash_t;
 
 static inline const char *hash_alg_to_string(uint16_t hash_alg)
@@ -75,11 +76,8 @@ static inline const char *hash_alg_to_string(uint16_t hash_alg)
         return "TB_HALG_SHA384";
     else if ( hash_alg == TB_HALG_SHA512 )
         return "TB_HALG_SHA512";
-    else {
-        static char buf[32];
-        snprintf(buf, sizeof(buf), "unsupported (%u)", hash_alg);
-        return buf;
-    }
+    else 
+        return "unsupported";
 }
 
 static inline unsigned int get_hash_size(uint16_t hash_alg)

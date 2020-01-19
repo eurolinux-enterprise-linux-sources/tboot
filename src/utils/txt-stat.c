@@ -47,6 +47,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <safe_lib.h>
 
 #define printk   printf
 #include "../include/config.h"
@@ -62,7 +63,6 @@ typedef uint8_t multiboot_info_t;
 void print_hex(const char* prefix, const void *start, size_t len);
 #include "../include/hash.h"
 #include "../tboot/include/txt/heap.h"
-
 #include "../tboot/txt/heap.c"
 #include "../tboot/include/lz.h"
 #include "../tboot/common/lz.c"
@@ -188,7 +188,7 @@ static void display_config_regs(void *txt_config_base)
     dpr._raw = read_txt_config_reg(txt_config_base, TXTCR_DPR);
     printf("\tDPR: 0x%016jx\n", dpr._raw);
     printf("\t    lock: %s\n", bit_to_str(dpr.lock));
-    printf("\t    top: 0x%08x\n", dpr.top << 20);
+    printf("\t    top: 0x%08x\n", (uint32_t)dpr.top << 20);
     printf("\t    size: %uMB (%uB)\n", dpr.size, dpr.size*1024*1024);
 
     /* PUBLIC.KEY */
@@ -211,7 +211,9 @@ static void display_config_regs(void *txt_config_base)
 
 static void display_heap(txt_heap_t *heap)
 {
-    verify_bios_data(heap);
+    uint64_t size = get_bios_data_size(heap);
+    bios_data_t *bios_data = get_bios_data_start(heap);
+    print_bios_data(bios_data, size);
 }
 
 static void display_tboot_log(void *log_base)
@@ -250,12 +252,10 @@ static void display_tboot_log(void *log_base)
             /* print out the uncompressed log */
             for ( int curr_pos = 0; curr_pos < length; curr_pos += sizeof(buf)-1 ) {
                 if ( length - curr_pos >= (int)sizeof(buf) - 1 ) {
-                    strncpy(buf, out + curr_pos, sizeof(buf)-1);
-                    buf[sizeof(buf)-1] = '\0';
+                    strncpy_s(buf, sizeof(buf), out + curr_pos, sizeof(buf)-1);
                 }
                 else {
-                    strncpy(buf, out + curr_pos, length - curr_pos);
-                    buf[length - curr_pos] = '\0';
+                    strncpy_s(buf, sizeof(buf), out + curr_pos, length - curr_pos);
                 }
                 printf("%s", buf);
             }
@@ -263,8 +263,7 @@ static void display_tboot_log(void *log_base)
     } 
 
     for ( unsigned int curr_pos = log->zip_pos[log->zip_count]; curr_pos < log->curr_pos; curr_pos += sizeof(buf)-1 ) {
-        strncpy(buf, log_buf + curr_pos, sizeof(buf)-1);
-        buf[sizeof(buf)-1] = '\0';
+        strncpy_s(buf, sizeof(buf), log_buf + curr_pos, sizeof(buf)-1);
         printf("%s", buf);
     }
     printf("\n");

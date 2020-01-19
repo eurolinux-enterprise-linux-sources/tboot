@@ -47,6 +47,8 @@
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/bn.h>
+#include <safe_lib.h>
+#include <snprintf_s.h>
 #define PRINT   printf
 #include "../include/config.h"
 #include "../include/hash.h"
@@ -86,10 +88,8 @@ void DISPLAY(const char *fmt, ...)
 
 size_t strlcpy(char *dst, const char *src, size_t siz)
 {
-    strncpy(dst, src, siz-1);
-    if ( siz != 0 )
-        *(dst + siz-1) = '\0';
-    return strlen(src);
+    strcpy_s(dst, siz, src);
+    return strnlen_s(dst, siz);
 }
 
 void print_hex(const char *prefix, const void *data, size_t n)
@@ -271,7 +271,7 @@ const char *hash_alg_to_str(uint16_t alg)
     case TPM_ALG_SM3_256:
         return "sm3";
     default:
-        snprintf(buf, sizeof(buf), "unknown (%u)", alg);
+        snprintf_s_i(buf, sizeof(buf), "unknown (%u)", alg);
         return buf;
     }
 }
@@ -287,12 +287,12 @@ const char *sig_alg_to_str(uint16_t alg)
     case TPM_ALG_SM2:
         return "sm2";
     default:
-        snprintf(buf, sizeof(buf), "unknown (%u)", alg);
+        snprintf_s_i(buf, sizeof(buf), "unknown (%u)", alg);
         return buf;
     }
 }
 
-extern uint16_t str_to_hash_alg(const char *str) 
+uint16_t str_to_hash_alg(const char *str) 
 {
     if (strcmp(str,"sha1") == 0)
         return TPM_ALG_SHA1;
@@ -308,12 +308,32 @@ extern uint16_t str_to_hash_alg(const char *str)
         return  TPM_ALG_NULL;
 }
 
-extern uint16_t str_to_sig_alg(const char *str, const uint16_t version)
+uint16_t str_to_lcp_hash_mask(const char *str)
+{
+    if (strcmp(str,"sha1") == 0)
+        return TPM_ALG_MASK_SHA1;
+    else if (strcmp(str,"sha256") == 0)
+        return TPM_ALG_MASK_SHA256;
+    else if (strcmp(str,"sha384") == 0)
+        return TPM_ALG_MASK_SHA384;
+    else if (strcmp(str,"sha512") == 0)
+        return TPM_ALG_MASK_SHA512;
+    else if (strcmp(str,"sm3") == 0)
+        return TPM_ALG_MASK_SM3_256;
+    else if(strncmp(str, "0X", 2) || strncmp(str, "0x", 2))
+        return strtoul(str, NULL, 0);
+    else
+        return  TPM_ALG_MASK_NULL;
+}
+
+uint16_t str_to_sig_alg(const char *str, const uint16_t version)
 {
     LOG("str_to_sig_alg:version=%x\n",version);
     if( version == LCP_TPM12_POLICY_LIST_VERSION) {
         if (strcmp(str,"rsa") == 0)
             return LCP_POLSALG_RSA_PKCS_15;
+        else if(strncmp(str, "0X", 2) || strncmp(str, "0x", 2))
+            return strtoul(str, NULL, 0);
         else 
             return LCP_POLSALG_NONE;
     }
@@ -329,8 +349,61 @@ extern uint16_t str_to_sig_alg(const char *str, const uint16_t version)
         else 
             return TPM_ALG_NULL;
     }
-    else 
+    else if(strncmp(str, "0X", 2) || strncmp(str, "0x", 2))
+        return strtoul(str, NULL, 0);
+    else
         return TPM_ALG_NULL;
+}
+uint32_t str_to_sig_alg_mask(const char *str, const uint16_t version)
+{
+    LOG("str_to_sig_alg_mask:version=%x\n",version);
+    uint16_t lcp_major_ver = version & 0xFF00;
+    if( lcp_major_ver == LCP_VER_2_0 ) {
+        //signature algorithm mask is undefined in LCPv2
+        return SIGN_ALG_MASK_NULL;
+    }
+    else if( lcp_major_ver == LCP_VER_3_0) {
+        if(strncmp(str, "0X", 2) || strncmp(str, "0x", 2)){
+            return strtoul(str, NULL, 0);
+        }
+        else{
+            //mask must be specified explicitly, no string parsing yet
+            return SIGN_ALG_MASK_NULL;
+        }
+    }
+    else 
+        return SIGN_ALG_MASK_NULL;
+}
+uint16_t str_to_pol_ver(const char *str)
+{
+    if( strcmp(str,"2.0") == 0)
+       return LCP_VER_2_0;
+    else if ( strcmp(str,"3.0") == 0)
+        return LCP_VER_3_0;
+    else if ( strcmp(str,"3.1") == 0)
+        return LCP_VER_3_1;
+    else 
+        return LCP_VER_NULL;
+}
+
+uint16_t convert_hash_alg_to_mask(uint16_t hash_alg)
+{
+    LOG("convert_hash_alg_to_mask hash_alg = 0x%x\n", hash_alg);
+    switch(hash_alg){
+    case TPM_ALG_SHA1:
+        return TPM_ALG_MASK_SHA1;
+    case TPM_ALG_SHA256:
+        return TPM_ALG_MASK_SHA256;
+    case TPM_ALG_SHA384:
+        return TPM_ALG_MASK_SHA384;
+    case TPM_ALG_SHA512:
+        return TPM_ALG_MASK_SHA512;
+    case TPM_ALG_SM3_256:
+        return TPM_ALG_MASK_SM3_256;
+    default:
+        return 0;
+    }
+    return 0;
 }
 
 size_t get_lcp_hash_size(uint16_t hash_alg)
@@ -370,14 +443,23 @@ bool verify_signature(const uint8_t *data, size_t data_size,
         ERROR("Error: failed to allocate key\n");
         return false;
     }
-    rsa_pubkey->n = BN_bin2bn(key, pubkey_size, NULL);
+
+    BIGNUM *modulus = BN_bin2bn(key, pubkey_size, NULL);
+    BIGNUM *exponent = BN_new();
 
     /* uses fixed exponent (LCP_SIG_EXPONENT) */
     char exp[32];
-    snprintf(exp, sizeof(exp), "%u", LCP_SIG_EXPONENT);
-    rsa_pubkey->e = NULL;
-    BN_dec2bn(&rsa_pubkey->e, exp);
-    rsa_pubkey->d = rsa_pubkey->p = rsa_pubkey->q = NULL;
+    snprintf_s_i(exp, sizeof(exp), "%u", LCP_SIG_EXPONENT);
+    BN_dec2bn(&exponent, exp);
+    /* OpenSSL Version 1.1.0 and later don't allow direct access to RSA 
+       stuct */ 
+    #if OPENSSL_VERSION_NUMBER >= 0x10100000L
+        RSA_set0_key(rsa_pubkey, modulus, exponent, NULL); 
+    #else
+        rsa_pubkey->n = modulus;
+        rsa_pubkey->e = exponent;
+        rsa_pubkey->d = rsa_pubkey->p = rsa_pubkey->q = NULL;
+    #endif
 
     uint16_t hashalg = TPM_ALG_SHA1;
     lcp_mle_element_t2 *mle;
@@ -489,6 +571,7 @@ bool verify_signature(const uint8_t *data, size_t data_size,
     default :
         LOG("unknown hash alg\n");
         return false;
+        RSA_free(rsa_pubkey);
     }
 
     RSA_free(rsa_pubkey);

@@ -183,8 +183,7 @@ static bool supports_smx(void)
 
 bool use_mwait(void)
 {
-    return get_tboot_mwait() && 
-           (g_cpuid_ext_feat_info & CPUID_X86_FEATURE_XMM3);
+    return get_tboot_mwait() && (g_cpuid_ext_feat_info & CPUID_X86_FEATURE_XMM3);
 }
 
 tb_error_t supports_txt(void)
@@ -306,7 +305,7 @@ static bool verify_vtd_pmrs(txt_heap_t *txt_heap)
     }
 
     /* compare to current values */
-    memset(&tmp_os_sinit_data, 0, sizeof(tmp_os_sinit_data));
+    tb_memset(&tmp_os_sinit_data, 0, sizeof(tmp_os_sinit_data));
     tmp_os_sinit_data.version = os_sinit_data->version;
     set_vtd_pmrs(&tmp_os_sinit_data, min_lo_ram, max_lo_ram, min_hi_ram,
                  max_hi_ram);
@@ -319,8 +318,8 @@ static bool verify_vtd_pmrs(txt_heap_t *txt_heap)
          (tmp_os_sinit_data.vtd_pmr_hi_size !=
           os_sinit_data->vtd_pmr_hi_size) ) {
         printk(TBOOT_ERR"OS to SINIT data VT-d PMR settings do not match:\n");
-        print_os_sinit_data(&tmp_os_sinit_data);
-        print_os_sinit_data(os_sinit_data);
+        print_os_sinit_data_vtdpmr(&tmp_os_sinit_data);
+        print_os_sinit_data_vtdpmr(os_sinit_data);
         return false;
     }
 
@@ -371,6 +370,10 @@ tb_error_t txt_verify_platform(void)
     err = supports_txt();
     if ( err != TB_ERR_NONE )
         return err;
+
+    if ( !vtd_bios_enabled() ) {
+        return TB_ERR_VTD_NOT_SUPPORTED;
+    }
 
     /* check is TXT_RESET.STS is set, since if it is SENTER will fail */
     txt_ests_t ests = (txt_ests_t)read_pub_config_reg(TXTCR_ESTS);
@@ -431,19 +434,19 @@ bool verify_e820_map(sinit_mdr_t* mdrs_base, uint32_t num_mdrs)
 
     /* sort mdrs */
     for( i = 0; i < num_mdrs; i++ ) {
-        memcpy(&tmp_entry, &mdrs_base[i], sizeof(sinit_mdr_t));
+        tb_memcpy(&tmp_entry, &mdrs_base[i], sizeof(sinit_mdr_t));
         pos = i;
         for ( j = i + 1; j < num_mdrs; j++ ) {
             if ( ( tmp_entry.base > mdrs_base[j].base )
                  || (( tmp_entry.base == mdrs_base[j].base ) &&
                      ( tmp_entry.length > mdrs_base[j].length )) ) {
-                memcpy(&tmp_entry, &mdrs_base[j], sizeof(sinit_mdr_t));
+                tb_memcpy(&tmp_entry, &mdrs_base[j], sizeof(sinit_mdr_t));
                 pos = j;
             }
         }
         if ( pos > i ) {
-            memcpy(&mdrs_base[pos], &mdrs_base[i], sizeof(sinit_mdr_t));
-            memcpy(&mdrs_base[i], &tmp_entry, sizeof(sinit_mdr_t));
+            tb_memcpy(&mdrs_base[pos], &mdrs_base[i], sizeof(sinit_mdr_t));
+            tb_memcpy(&mdrs_base[i], &tmp_entry, sizeof(sinit_mdr_t));
         }
     }
 

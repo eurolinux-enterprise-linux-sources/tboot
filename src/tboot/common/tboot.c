@@ -69,14 +69,17 @@
 #include <acpi.h>
 #include <integrity.h>
 #include <cmdline.h>
+#include <tpm_20.h>
 
 extern void _prot_to_real(uint32_t dist_addr);
 extern bool set_policy(void);
 extern void verify_all_modules(loader_ctx *lctx);
 extern void verify_all_nvindices(void);
 extern void apply_policy(tb_error_t error);
+extern void verify_IA32_se_svn_status(const acm_hdr_t *acm_hdr);
 void s3_launch(void);
-
+extern __data u32 handle2048;
+extern __data tpm_contextsave_out tpm2_context_saved;
 /* counter timeout for waiting for all APs to exit guests */
 #define AP_GUEST_EXIT_TIMEOUT     0x01000000
 
@@ -93,6 +96,7 @@ extern struct mutex ap_lock;
 __data loader_ctx g_loader_ctx = { NULL, 0 };
 __data loader_ctx *g_ldr_ctx = &g_loader_ctx;
 __data uint32_t g_mb_orig_size = 0;
+
 
 /* MLE/kernel shared data page (in boot.S) */
 extern tboot_shared_t _tboot_shared;
@@ -133,18 +137,18 @@ static void copy_s3_wakeup_entry(void)
     }
 
     /* backup target address space first */
-    memcpy(g_saved_s3_wakeup_page, (void *)TBOOT_S3_WAKEUP_ADDR,
+    tb_memcpy(g_saved_s3_wakeup_page, (void *)TBOOT_S3_WAKEUP_ADDR,
            s3_wakeup_end - s3_wakeup_16);
 
     /* copy s3 entry into target mem */
-    memcpy((void *)TBOOT_S3_WAKEUP_ADDR, s3_wakeup_16,
+    tb_memcpy((void *)TBOOT_S3_WAKEUP_ADDR, s3_wakeup_16,
            s3_wakeup_end - s3_wakeup_16);
 }
 
 static void restore_saved_s3_wakeup_page(void)
 {
     /* restore saved page */
-    memcpy((void *)TBOOT_S3_WAKEUP_ADDR, g_saved_s3_wakeup_page,
+    tb_memcpy((void *)TBOOT_S3_WAKEUP_ADDR, g_saved_s3_wakeup_page,
            s3_wakeup_end - s3_wakeup_16);
 }
 
@@ -152,6 +156,8 @@ static void post_launch(void)
 {
     uint64_t base, size;
     tb_error_t err;
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
     extern tboot_log_t *g_log;
     extern void shutdown_entry(void);
 
@@ -163,12 +169,13 @@ static void post_launch(void)
     txt_post_launch();
 
     /* backup DMAR table */
-    save_vtd_dmar_table();
+    if ( get_tboot_save_vtd() )
+        save_vtd_dmar_table();
 
     if ( s3_flag  )    
          s3_launch();
 
-    /* remove all TXT modules before verifying modules */
+    /* remove all TXT sinit acm modules before verifying modules */
     remove_txt_modules(g_ldr_ctx);
 
     /*
@@ -198,21 +205,8 @@ static void post_launch(void)
     size = (uint64_t)get_tboot_mem_end() - base;
     uint32_t mem_type = is_kernel_linux() ? E820_RESERVED : E820_UNUSABLE;
     printk(TBOOT_INFO"protecting tboot (%Lx - %Lx) in e820 table\n", base,      (base + size - 1));
-    if ( !e820_protect_region(base, size, mem_type) )        apply_policy(TB_ERR_FATAL);
-
-    /* if using memory logging, reserve log area */
-    if ( g_log_targets & TBOOT_LOG_TARGET_MEMORY ) {
-        base = TBOOT_SERIAL_LOG_ADDR;
-        size = TBOOT_SERIAL_LOG_SIZE;
-        printk(TBOOT_INFO"reserving tboot memory log (%Lx - %Lx) in e820 table\n", base,        (base + size - 1));
-        if ( !e820_protect_region(base, size, E820_RESERVED) )         apply_policy(TB_ERR_FATAL);
-    }
-
-    /* replace map in loader context with copy */
-    replace_e820_map(g_ldr_ctx);
-
-    printk(TBOOT_DETA"adjusted e820 map:\n");
-    print_e820_map();
+    if ( !e820_protect_region(base, size, mem_type) )      
+        apply_policy(TB_ERR_FATAL);
 
     /*
      * verify modules against policy
@@ -222,17 +216,24 @@ static void post_launch(void)
     /*
      * verify nv indices against policy
      */
-    if ( (g_tpm->major == TPM12_VER_MAJOR) &&  get_tboot_measure_nv() )        verify_all_nvindices();
+    if ( (tpm->major == TPM12_VER_MAJOR) &&  get_tboot_measure_nv() ) 
+	verify_all_nvindices();
 
     /*
      * seal hashes of modules and VL policy to current value of PCR17 & 18
      */
-    if ( !seal_pre_k_state() )        apply_policy(TB_ERR_S3_INTEGRITY);
+    if ( !seal_pre_k_state() )        
+	apply_policy(TB_ERR_S3_INTEGRITY);
 
-    /*
+	
+    if ( tpm->major == TPM20_VER_MAJOR ) {
+	tpm_fp->context_save(tpm, tpm->cur_loc, handle2048, &tpm2_context_saved);
+    }
+
+	/*
      * init MLE/kernel shared data page
      */
-    memset(&_tboot_shared, 0, PAGE_SIZE);
+    tb_memset(&_tboot_shared, 0, PAGE_SIZE);
     _tboot_shared.uuid = (uuid_t)TBOOT_SHARED_UUID;
     _tboot_shared.version = 6;
     _tboot_shared.log_addr = (uint32_t)g_log;
@@ -240,7 +241,7 @@ static void post_launch(void)
     _tboot_shared.tboot_base = (uint32_t)&_start;
     _tboot_shared.tboot_size = (uint32_t)&_end - (uint32_t)&_start;
     uint32_t key_size = sizeof(_tboot_shared.s3_key);
-    if ( !g_tpm->get_random(g_tpm, 2, _tboot_shared.s3_key, &key_size) || key_size != sizeof(_tboot_shared.s3_key) )
+    if ( !tpm_fp->get_random(tpm, 2, _tboot_shared.s3_key, &key_size) || key_size != sizeof(_tboot_shared.s3_key) )
         apply_policy(TB_ERR_S3_INTEGRITY);
     _tboot_shared.num_in_wfs = atomic_read(&ap_wfs_count);
     if ( use_mwait() ) {
@@ -335,9 +336,9 @@ void begin_launch(void *addr, uint32_t magic)
            // cmdline = skip_filename(cmdline_orig);
             cmdline = cmdline_orig;
         }
-        memset(g_cmdline, '\0', sizeof(g_cmdline));
+        tb_memset(g_cmdline, '\0', sizeof(g_cmdline));
         if (cmdline)
-            strncpy(g_cmdline, cmdline, sizeof(g_cmdline)-1);
+            tb_strncpy(g_cmdline, cmdline, sizeof(g_cmdline)-1);
     }
 
     /* always parse cmdline */
@@ -378,10 +379,6 @@ void begin_launch(void *addr, uint32_t magic)
         if ( !copy_e820_map(g_ldr_ctx) )  apply_policy(TB_ERR_FATAL);
     }
 
-    /* make TPM ready for measured launch */
-    if (!tpm_detect()) 
-       apply_policy(TB_ERR_TPM_NOT_READY);
-   
     /* we need to make sure this is a (TXT-) capable platform before using */
     /* any of the features, incl. those required to check if the environment */
     /* has already been launched */
@@ -395,8 +392,13 @@ void begin_launch(void *addr, uint32_t magic)
        if (!verify_acmod(g_sinit)) 
            apply_policy(TB_ERR_ACMOD_VERIFY_FAILED);
     }
+    
+    /* make TPM ready for measured launch */
+    if (!tpm_detect())
+       apply_policy(TB_ERR_TPM_NOT_READY);
 
-
+    /* verify SE enablement status */
+    verify_IA32_se_svn_status(g_sinit);
 
     /* read tboot verified launch control policy from TPM-NV (will use default if none in TPM-NV) */
     err = set_policy();
@@ -412,7 +414,10 @@ void begin_launch(void *addr, uint32_t magic)
     apply_policy(err);
 
     /* print any errors on last boot, which must be from TXT launch */
-    txt_get_error();
+    txt_display_errors();
+    if (txt_has_error() && get_tboot_ignore_prev_err() == false) {
+        apply_policy(TB_ERR_PREV_TXT_ERROR);
+    }
 
     /* need to verify that platform can perform measured launch */
     err = verify_platform();
@@ -425,7 +430,7 @@ void begin_launch(void *addr, uint32_t magic)
     /* this is being called post-measured launch */
     if ( is_launched() ){
         printk(TBOOT_INFO"Post_launch started ...\n");
-	 post_launch();
+	post_launch();
     }
 
     /* make the CPU ready for measured launch */
@@ -458,11 +463,19 @@ void begin_launch(void *addr, uint32_t magic)
 
 void s3_launch(void)
 {
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
     /* restore backed-up s3 wakeup page */
     restore_saved_s3_wakeup_page();
+    /* load saved tpm2 context for unseal */
+    if ( tpm->major == TPM20_VER_MAJOR ) {
+        tpm_fp->context_flush(tpm, tpm->cur_loc, handle2048);
+        tpm_fp->context_load(tpm, tpm->cur_loc, &tpm2_context_saved, &handle2048);
+    }
 
     /* remove DMAR table if necessary */
-    remove_vtd_dmar_table();
+    if ( get_tboot_save_vtd() )
+        remove_vtd_dmar_table();
 
     if ( !is_launched() )
         apply_policy(TB_ERR_S3_INTEGRITY);
@@ -490,9 +503,11 @@ static void shutdown_system(uint32_t shutdown_type)
     char type[32];
 
     if ( shutdown_type >= ARRAY_SIZE(types) )
-        snprintf(type, sizeof(type), "unknown: %u", shutdown_type);
-    else
-        strncpy(type, types[shutdown_type], sizeof(type));
+        tb_snprintf(type, sizeof(type), "unknown: %u", shutdown_type);
+    else {
+        tb_strncpy(type, types[shutdown_type], sizeof(type));
+        type[sizeof(type) - 1] = '\0';
+    }
     printk(TBOOT_INFO"shutdown_system() called for shutdown_type: %s\n", type);
 
     switch( shutdown_type ) {
@@ -501,11 +516,13 @@ static void shutdown_system(uint32_t shutdown_type)
             /* write our S3 resume vector to ACPI resume addr */
             set_s3_resume_vector(&_tboot_shared.acpi_sinfo,  TBOOT_S3_WAKEUP_ADDR);
             /* fall through for rest of Sx handling */
+        /* FALLTHROUGH */
         case TB_SHUTDOWN_S4:
         case TB_SHUTDOWN_S5:
             machine_sleep(&_tboot_shared.acpi_sinfo);
             /* if machine_sleep() fails, fall through to reset */
 
+        /* FALLTHROUGH */
         case TB_SHUTDOWN_REBOOT:
             if ( txt_is_powercycle_required() ) {
                 /* powercycle by writing 0x0a+0x0e to port 0xcf9 */
@@ -524,6 +541,7 @@ static void shutdown_system(uint32_t shutdown_type)
                 outb(0xcf9, 0x06);
             }
 
+        /* FALLTHROUGH */
         case TB_SHUTDOWN_HALT:
         default:
             while ( true )
@@ -533,6 +551,9 @@ static void shutdown_system(uint32_t shutdown_type)
 
 void shutdown(void)
 {
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
+   
     /* wait-for-sipi only invoked for APs, so skip all BSP shutdown code */
     if ( _tboot_shared.shutdown_type == TB_SHUTDOWN_WFS ) {
         atomic_inc(&ap_wfs_count);
@@ -558,46 +579,53 @@ void shutdown(void)
             printk(TBOOT_ERR"Release TPM FIFO locality 0 failed \n");
         if (!release_locality(1))
             printk(TBOOT_ERR"Release TPM FIFO locality 1 failed \n");
-        if (!tpm_wait_cmd_ready(g_tpm->cur_loc))
-            printk(TBOOT_ERR"Request TPM FIFO locality %d failed \n", g_tpm->cur_loc);
+        if (!tpm_wait_cmd_ready(tpm->cur_loc))
+            printk(TBOOT_ERR"Request TPM FIFO locality %d failed \n", tpm->cur_loc);
     }
     else {
         if (!tpm_relinquish_locality_crb(0))
             printk(TBOOT_ERR"Release TPM CRB locality 0 failed \n");
         if (!tpm_relinquish_locality_crb(1))			 
             printk(TBOOT_ERR"Release TPM CRB locality 1 failed \n");
-        if (!tpm_request_locality_crb(g_tpm->cur_loc))
-            printk(TBOOT_ERR"Request TPM CRB locality %d failed \n", g_tpm->cur_loc);
+        if (!tpm_request_locality_crb(tpm->cur_loc))
+            printk(TBOOT_ERR"Request TPM CRB locality %d failed \n", tpm->cur_loc);
     }
 
     if ( _tboot_shared.shutdown_type == TB_SHUTDOWN_S3 ) {
         /* restore DMAR table if needed */
-        restore_vtd_dmar_table();
+        if ( get_tboot_save_vtd() )
+            restore_vtd_dmar_table();
+	if ( tpm->major == TPM20_VER_MAJOR ) {
+	    tpm_fp->context_flush(tpm, tpm->cur_loc, handle2048);
+	    tpm_fp->context_load(tpm, tpm->cur_loc, &tpm2_context_saved, &handle2048);
+ 	}
 
-        /* save kernel/VMM resume vector for sealing */
+		
+	/* save kernel/VMM resume vector for sealing */
         g_post_k_s3_state.kernel_s3_resume_vector =  _tboot_shared.acpi_sinfo.kernel_s3_resume_vector;
         
         /* create and seal memory integrity measurement */
-        if ( !seal_post_k_state() )   apply_policy(TB_ERR_S3_INTEGRITY);
+        if ( !seal_post_k_state() )   
+	    apply_policy(TB_ERR_S3_INTEGRITY);
             /* OK to leave key in memory on failure since if user cared they
                would have policy that doesn't continue for TB_ERR_S3_INTEGRITY
                error */
         else
             /* wipe S3 key from memory now that it is sealed */
-            memset(_tboot_shared.s3_key, 0, sizeof(_tboot_shared.s3_key));
+            tb_memset(_tboot_shared.s3_key, 0, sizeof(_tboot_shared.s3_key));
     }
 
     /* cap dynamic PCRs extended as part of launch (17, 18, ...) */
     if ( is_launched() ) {
 
         /* cap PCRs to ensure no follow-on code can access sealed data */
-        g_tpm->cap_pcrs(g_tpm, g_tpm->cur_loc, -1);
+        tpm_fp->cap_pcrs(tpm, tpm->cur_loc, -1);
 
         /* have TPM save static PCRs (in case VMM/kernel didn't) */
         /* per TCG spec, TPM can invalidate saved state if any other TPM
            operation is performed afterwards--so do this last */
         if ( _tboot_shared.shutdown_type == TB_SHUTDOWN_S3 )
-            g_tpm->save_state(g_tpm, g_tpm->cur_loc);
+            tpm_fp->save_state(tpm, tpm->cur_loc);
 
         /* scrub any secrets by clearing their memory, then flush cache */
         /* we don't have any secrets to scrub, however */

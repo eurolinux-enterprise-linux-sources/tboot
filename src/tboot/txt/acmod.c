@@ -289,6 +289,7 @@ void print_txt_caps(const char *prefix, txt_caps_t caps)
     printk(TBOOT_DETA"%s    pcr_map_da: %d\n", prefix, caps.pcr_map_da);
     printk(TBOOT_DETA"%s    platform_type: %d\n", prefix, caps.platform_type);
     printk(TBOOT_DETA"%s    max_phy_addr: %d\n", prefix, caps.max_phy_addr);
+    printk(TBOOT_DETA"%s    tcg_event_log_format: %d\n", prefix, caps.tcg_event_log_format);
 }
 
 static void print_acm_hdr(const acm_hdr_t *hdr, const char *mod_name)
@@ -445,8 +446,8 @@ static bool is_acmod(const void *acmod_base, uint32_t acmod_size, uint8_t *type,
     if ( acmod_size < sizeof(acm_hdr_t) ) {
         if ( !quiet )
             printk(TBOOT_ERR"\t ACM size is too small: acmod_size=%x,"
-                   " sizeof(acm_hdr)=%x\n", acmod_size,
-                   (uint32_t)sizeof(acm_hdr) );
+                   " sizeof(acm_hdr_t)=%x\n", acmod_size,
+                   (uint32_t)sizeof(acm_hdr_t) );
         return false;
     }
 
@@ -650,6 +651,8 @@ bool does_acmod_match_platform(const acm_hdr_t* hdr)
 #ifndef IS_INCLUDED
 acm_hdr_t *get_bios_sinit(const void *sinit_region_base)
 {
+    if ( sinit_region_base == NULL )
+       return NULL;
     txt_heap_t *txt_heap = get_txt_heap();
     bios_data_t *bios_data = get_bios_data_start(txt_heap);
 
@@ -682,7 +685,7 @@ acm_hdr_t *copy_racm(const acm_hdr_t *racm)
     printk(TBOOT_DETA"RACM.SIZE: 0x%x (%u)\n", racm_region_size, racm_region_size);
 
     /* copy it there */
-    memcpy(racm_region_base, racm, racm->size*4);
+    tb_memcpy(racm_region_base, racm, racm->size*4);
 
     printk(TBOOT_DETA"copied RACM (size=%x) to %p\n", racm->size*4,
            racm_region_base);
@@ -737,8 +740,11 @@ acm_hdr_t *copy_sinit(const acm_hdr_t *sinit)
         return NULL;
     }
 
+    if ( sinit_region_base == NULL )
+       return NULL;
+
     /* copy it there */
-    memcpy(sinit_region_base, sinit, sinit->size*4);
+    tb_memcpy(sinit_region_base, sinit, sinit->size*4);
 
     printk(TBOOT_DETA"copied SINIT (size=%x) to %p\n", sinit->size*4,
            sinit_region_base);
@@ -828,6 +834,8 @@ bool verify_racm(const acm_hdr_t *acm_hdr)
 #ifndef IS_INCLUDED     /*  defined in utils/acminfo.c  */
 void verify_IA32_se_svn_status(const acm_hdr_t *acm_hdr)
 {
+    struct tpm_if *tpm = get_tpm();
+    const struct tpm_if_fp *tpm_fp = get_tpm_fp();
   
     printk(TBOOT_INFO"SGX:verify_IA32_se_svn_status is called\n");
         
@@ -841,8 +849,8 @@ void verify_IA32_se_svn_status(const acm_hdr_t *acm_hdr)
     
     if (((rdmsr(MSR_IA32_SE_SVN_STATUS)>>16) & 0xff) != acm_hdr->se_svn) {
         printk(TBOOT_INFO"se_svn is not equal to ACM se_svn\n");
-        if (!g_tpm->nv_write(g_tpm, 0, g_tpm->sgx_svn_index, 0, (uint8_t *)&(acm_hdr->se_svn), 1)) 
-            printk(TBOOT_ERR"Write sgx_svn_index 0x%x failed. \n", g_tpm->sgx_svn_index);
+        if (!tpm_fp->nv_write(tpm, 0, tpm->sgx_svn_index, 0, (uint8_t *)&(acm_hdr->se_svn), 1)) 
+            printk(TBOOT_ERR"Write sgx_svn_index 0x%x failed. \n", tpm->sgx_svn_index);
         else
             printk(TBOOT_INFO"Write sgx_svn_index with 0x%x successful.\n", acm_hdr->se_svn);
 
@@ -905,9 +913,6 @@ bool verify_acmod(const acm_hdr_t *acm_hdr)
 
     /* print it for debugging */
     print_acm_hdr(acm_hdr, "SINIT");
-
-    /* verify SE enablement status */
-    verify_IA32_se_svn_status(acm_hdr);
 
     /* entry point is offset from base addr so make sure it is within module */
     if ( acm_hdr->entry_point >= size ) {

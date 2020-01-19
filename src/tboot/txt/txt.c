@@ -67,7 +67,7 @@
 #include <io.h>
 
 /* counter timeout for waiting for all APs to enter wait-for-sipi */
-#define AP_WFS_TIMEOUT     0x01000000
+#define AP_WFS_TIMEOUT     0x10000000
 
 __data struct acpi_rsdp g_rsdp;
 extern char _start[];             /* start of module */
@@ -87,7 +87,7 @@ extern void apply_policy(tb_error_t error);
 extern void cpu_wakeup(uint32_t cpuid, uint32_t sipi_vec);
 extern void print_event(const tpm12_pcr_event_t *evt);
 extern void print_event_2(void *evt, uint16_t alg);
-
+extern uint32_t print_event_2_1(void *evt);
 
 /*
  * this is the structure whose addr we'll put in TXT heap
@@ -178,7 +178,7 @@ static void *build_mle_pagetable(uint32_t mle_start, uint32_t mle_size)
     /* place ptab_base below MLE */
     ptab_size = sizeof(g_mle_pt);
     ptab_base = &g_mle_pt;
-    memset(ptab_base, 0, ptab_size);
+    tb_memset(ptab_base, 0, ptab_size);
     printk(TBOOT_DETA"ptab_size=%x, ptab_base=%p\n", ptab_size, ptab_base);
 
     pg_dir_ptr_tab = ptab_base;
@@ -206,6 +206,7 @@ static void *build_mle_pagetable(uint32_t mle_start, uint32_t mle_size)
 
 static __data event_log_container_t *g_elog = NULL;
 static __data heap_event_log_ptr_elt2_t *g_elog_2 = NULL;
+static __data heap_event_log_ptr_elt2_1_t *g_elog_2_1 = NULL;
 
 /* should be called after os_mle_data initialized */
 static void *init_event_log(void)
@@ -213,7 +214,7 @@ static void *init_event_log(void)
     os_mle_data_t *os_mle_data = get_os_mle_data_start(get_txt_heap());
     g_elog = (event_log_container_t *)&os_mle_data->event_log_buffer;
 
-    memcpy((void *)g_elog->signature, EVTLOG_SIGNATURE,
+    tb_memcpy((void *)g_elog->signature, EVTLOG_SIGNATURE,
            sizeof(g_elog->signature));
     g_elog->container_ver_major = EVTLOG_CNTNR_MAJOR_VER;
     g_elog->container_ver_minor = EVTLOG_CNTNR_MINOR_VER;
@@ -226,15 +227,31 @@ static void *init_event_log(void)
     return (void *)g_elog;
 }
 
+/* initialize TCG compliant TPM 2.0 event log descriptor */
+static void init_evtlog_desc_1(heap_event_log_ptr_elt2_1_t *evt_log)
+{
+    os_mle_data_t *os_mle_data = get_os_mle_data_start(get_txt_heap());
+   
+    evt_log->phys_addr = (uint64_t)(unsigned long)(os_mle_data->event_log_buffer);
+    evt_log->allcoated_event_container_size = 2*PAGE_SIZE;
+    evt_log->first_record_offset = 0;
+    evt_log->next_record_offset = 0;
+    printk(TBOOT_DETA"TCG compliant TPM 2.0 event log descriptor:\n");
+    printk(TBOOT_DETA"\t phys_addr = 0x%LX\n",  evt_log->phys_addr);
+    printk(TBOOT_DETA"\t allcoated_event_container_size = 0x%x \n", evt_log->allcoated_event_container_size);
+    printk(TBOOT_DETA"\t first_record_offset = 0x%x \n", evt_log->first_record_offset);
+    printk(TBOOT_DETA"\t next_record_offset = 0x%x \n", evt_log->next_record_offset);
+}
+
 static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
 {
     unsigned int i;
     os_mle_data_t *os_mle_data = get_os_mle_data_start(get_txt_heap());
-
-    switch (g_tpm->extpol) {
+    struct tpm_if *tpm = get_tpm();
+    switch (tpm->extpol) {
     case TB_EXTPOL_AGILE:
         for (i=0; i<evt_log->count; i++) {
-            evt_log->event_log_descr[i].alg = g_tpm->algs_banks[i];
+            evt_log->event_log_descr[i].alg = tpm->algs_banks[i];
             evt_log->event_log_descr[i].phys_addr =
                     (uint64_t)(unsigned long)(os_mle_data->event_log_buffer + i*4096);
             evt_log->event_log_descr[i].size = 4096;
@@ -244,7 +261,7 @@ static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
         break;
     case TB_EXTPOL_EMBEDDED:
         for (i=0; i<evt_log->count; i++) {
-            evt_log->event_log_descr[i].alg = g_tpm->algs[i];
+            evt_log->event_log_descr[i].alg = tpm->algs[i];
             evt_log->event_log_descr[i].phys_addr =
                     (uint64_t)(unsigned long)(os_mle_data->event_log_buffer + i*4096);
             evt_log->event_log_descr[i].size = 4096;
@@ -253,7 +270,7 @@ static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
         }
         break;
     case TB_EXTPOL_FIXED:
-        evt_log->event_log_descr[0].alg = g_tpm->cur_alg;
+        evt_log->event_log_descr[0].alg = tpm->cur_alg;
         evt_log->event_log_descr[0].phys_addr =
                     (uint64_t)(unsigned long)os_mle_data->event_log_buffer;
         evt_log->event_log_descr[0].size = 4096;
@@ -265,31 +282,66 @@ static void init_evtlog_desc(heap_event_log_ptr_elt2_t *evt_log)
     }
 }
 
+int get_evtlog_type(void)
+{
+    struct tpm_if *tpm = get_tpm();
+
+    if (tpm->major == TPM12_VER_MAJOR) {
+        return EVTLOG_TPM12;
+    } else if (tpm->major == TPM20_VER_MAJOR) {
+        /*
+         * Force use of legacy TPM2 log format to deal with a bug in some SINIT
+         * ACMs that where they don't log the MLE hash to the event log.
+         */
+        if (get_tboot_force_tpm2_legacy_log()) {
+            return EVTLOG_TPM2_LEGACY;
+        }
+        if (g_sinit) {
+            txt_caps_t sinit_caps = get_sinit_capabilities(g_sinit);
+            return sinit_caps.tcg_event_log_format ? EVTLOG_TPM2_TCG : EVTLOG_TPM2_LEGACY;
+        } else {
+            printk(TBOOT_ERR"SINIT not found\n");
+        }
+    } else {
+        printk(TBOOT_ERR"Unknown TPM major version: %d\n", tpm->major);
+    }
+    printk(TBOOT_ERR"Unable to determine log type\n");
+    return EVTLOG_UNKNOWN;
+}
+
 static void init_os_sinit_ext_data(heap_ext_data_element_t* elts)
 {
     heap_ext_data_element_t* elt = elts;
-    heap_event_log_ptr_elt_t *evt_log;
-
-    if ( g_tpm->major == TPM12_VER_MAJOR ) {
+    heap_event_log_ptr_elt_t* evt_log;
+    struct tpm_if *tpm = get_tpm();
+ 
+    int log_type = get_evtlog_type();
+    if ( log_type == EVTLOG_TPM12 ) {
         evt_log = (heap_event_log_ptr_elt_t *)elt->data;
         evt_log->event_log_phys_addr = (uint64_t)(unsigned long)init_event_log();
         elt->type = HEAP_EXTDATA_TYPE_TPM_EVENT_LOG_PTR;
         elt->size = sizeof(*elt) + sizeof(*evt_log);
-    } else if ( g_tpm->major == TPM20_VER_MAJOR ) {
+    } else if ( log_type == EVTLOG_TPM2_TCG ) {
+        g_elog_2_1 = (heap_event_log_ptr_elt2_1_t *)elt->data;
+        init_evtlog_desc_1(g_elog_2_1);
+        elt->type = HEAP_EXTDATA_TYPE_TPM_EVENT_LOG_PTR_2_1;
+        elt->size = sizeof(*elt) + sizeof(heap_event_log_ptr_elt2_1_t);
+        printk(TBOOT_DETA"heap_ext_data_element TYPE = %d \n", elt->type);
+        printk(TBOOT_DETA"heap_ext_data_element SIZE = %d \n", elt->size);
+    }  else if ( log_type == EVTLOG_TPM2_LEGACY ) {
         g_elog_2 = (heap_event_log_ptr_elt2_t *)elt->data;
-
-        if ( g_tpm->extpol == TB_EXTPOL_AGILE )
-            g_elog_2->count = g_tpm->banks;
-        else if ( g_tpm->extpol == TB_EXTPOL_EMBEDDED )
-            g_elog_2->count = g_tpm->alg_count;
+        if ( tpm->extpol == TB_EXTPOL_AGILE )
+            g_elog_2->count = tpm->banks;
         else
-            g_elog_2->count = 1;
-
+            if ( tpm->extpol == TB_EXTPOL_EMBEDDED )
+                g_elog_2->count = tpm->alg_count;
+            else
+                g_elog_2->count = 1;
         init_evtlog_desc(g_elog_2);
-
         elt->type = HEAP_EXTDATA_TYPE_TPM_EVENT_LOG_PTR_2;
         elt->size = sizeof(*elt) + sizeof(u32) +
-                g_elog_2->count * sizeof(heap_event_log_descr_t);
+            g_elog_2->count * sizeof(heap_event_log_descr_t);
+        printk(TBOOT_DETA"INTEL TXT LOG elt SIZE = %d \n", elt->size);
     }
 
     elt = (void *)elt + elt->size;
@@ -310,7 +362,7 @@ bool evtlog_append_tpm12(uint8_t pcr, tb_hash_t *hash, uint32_t type)
 
     next->pcr_index = pcr;
     next->type = type;
-    memcpy(next->digest, hash, sizeof(next->digest));
+    tb_memcpy(next->digest, hash, sizeof(next->digest));
     next->data_size = 0;
 
     g_elog->next_event_offset += sizeof(*next) + next->data_size;
@@ -356,7 +408,7 @@ void dump_event_2(void)
     }
 }
 
-bool evtlog_append_tpm20(uint8_t pcr, uint16_t alg, tb_hash_t *hash, uint32_t type)
+bool evtlog_append_tpm2_legacy(uint8_t pcr, uint16_t alg, tb_hash_t *hash, uint32_t type)
 {
     heap_event_log_descr_t *cur_desc = NULL;
     uint32_t hash_size; 
@@ -384,7 +436,7 @@ bool evtlog_append_tpm20(uint8_t pcr, uint16_t alg, tb_hash_t *hash, uint32_t ty
     next += sizeof(u32);
     *((u32 *)next) = type;
     next += sizeof(u32);
-    memcpy((uint8_t *)next, hash, hash_size);
+    tb_memcpy((uint8_t *)next, hash, hash_size);
     next += hash_size;
     *((u32 *)next) = 0;
     cur_desc->next_event_offset += 3*sizeof(uint32_t) + hash_size; 
@@ -393,16 +445,77 @@ bool evtlog_append_tpm20(uint8_t pcr, uint16_t alg, tb_hash_t *hash, uint32_t ty
     return true;
 }
 
+bool evtlog_append_tpm2_tcg(uint8_t pcr, uint32_t type, hash_list_t *hl)
+{
+    uint32_t i, event_size;
+    unsigned int hash_size;
+    tcg_pcr_event2 *event;
+    uint8_t *hash_entry;
+    tcg_pcr_event2 dummy;
+
+    /*
+     * Dont't use sizeof(tcg_pcr_event2) since that has TPML_DIGESTV_VALUES_1.digests
+     * set to 5. Compute the static size as pcr_index + event_type +
+     * digest.count + event_size. Then add the space taken up by the hashes.
+     */
+    event_size = sizeof(dummy.pcr_index) + sizeof(dummy.event_type) +
+        sizeof(dummy.digest.count) + sizeof(dummy.event_size);
+
+    for (i = 0; i < hl->count; i++) {
+        hash_size = get_hash_size(hl->entries[i].alg);
+        if (hash_size == 0) {
+            return false;
+        }
+        event_size += sizeof(uint16_t); // hash_alg field
+        event_size += hash_size;
+    }
+
+    // Check if event will fit in buffer.
+    if (event_size + g_elog_2_1->next_record_offset >
+        g_elog_2_1->allcoated_event_container_size) {
+        return false;
+    }
+
+    event = (tcg_pcr_event2*)(void *)(unsigned long)g_elog_2_1->phys_addr +
+        g_elog_2_1->next_record_offset;
+    event->pcr_index = pcr;
+    event->event_type = type;
+    event->event_size = 0;  // No event data passed by tboot.
+    event->digest.count = hl->count;
+
+    hash_entry = (uint8_t *)&event->digest.digests[0];
+    for (i = 0; i < hl->count; i++) {
+        // Populate individual TPMT_HA_1 structs.
+        *((uint16_t *)hash_entry) = hl->entries[i].alg; // TPMT_HA_1.hash_alg
+        hash_entry += sizeof(uint16_t);
+        hash_size = get_hash_size(hl->entries[i].alg);  // already checked above
+        tb_memcpy(hash_entry, &(hl->entries[i].hash), hash_size);
+        hash_entry += hash_size;
+    }
+
+    g_elog_2_1->next_record_offset += event_size;
+    print_event_2_1(event);
+    return true;
+}
+
 bool evtlog_append(uint8_t pcr, hash_list_t *hl, uint32_t type)
 {
-    switch (g_tpm->major) {
-    case TPM12_VER_MAJOR:
-        evtlog_append_tpm12(pcr, &hl->entries[0].hash, type);
+    int log_type = get_evtlog_type();
+    switch (log_type) {
+    case EVTLOG_TPM12:
+        if ( !evtlog_append_tpm12(pcr, &hl->entries[0].hash, type) )
+            return false;
         break;
-    case TPM20_VER_MAJOR:
-        for (unsigned int i=0; i<hl->count; i++)
-            evtlog_append_tpm20(pcr, hl->entries[i].alg,
-                    &hl->entries[i].hash, type);
+    case EVTLOG_TPM2_LEGACY:
+        for (unsigned int i=0; i<hl->count; i++) {
+            if ( !evtlog_append_tpm2_legacy(pcr, hl->entries[i].alg,
+                &hl->entries[i].hash, type))
+                return false;
+	    }
+        break;
+    case EVTLOG_TPM2_TCG:
+        if ( !evtlog_append_tpm2_tcg(pcr, type, hl) )
+            return false;
         break;
     default:
         return false;
@@ -421,6 +534,7 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
 {
     txt_heap_t *txt_heap;
     uint64_t *size;
+    struct tpm_if *tpm = get_tpm();
 
     txt_heap = get_txt_heap();
 
@@ -436,7 +550,7 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
     os_mle_data_t *os_mle_data = get_os_mle_data_start(txt_heap);
     size = (uint64_t *)((uint32_t)os_mle_data - sizeof(uint64_t));
     *size = sizeof(*os_mle_data) + sizeof(uint64_t);
-    memset(os_mle_data, 0, sizeof(*os_mle_data));
+    tb_memset(os_mle_data, 0, sizeof(*os_mle_data));
     os_mle_data->version = 3;
     os_mle_data->lctx_addr = lctx->addr;
     os_mle_data->saved_misc_enable_msr = rdmsr(MSR_IA32_MISC_ENABLE);
@@ -457,7 +571,7 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
     os_sinit_data_t *os_sinit_data = get_os_sinit_data_start(txt_heap);
     size = (uint64_t *)((uint32_t)os_sinit_data - sizeof(uint64_t));
     *size = calc_os_sinit_data_size(version);
-    memset(os_sinit_data, 0, *size);
+    tb_memset(os_sinit_data, 0, *size);
     os_sinit_data->version = version;
 
     /* this is phys addr */
@@ -485,7 +599,7 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
                    lcp_size);
             return NULL;
         }
-        memcpy(os_mle_data->lcp_po_data, lcp_base, lcp_size);
+        tb_memcpy(os_mle_data->lcp_po_data, lcp_base, lcp_size);
         os_sinit_data->lcp_po_base = (unsigned long)&os_mle_data->lcp_po_data;
         os_sinit_data->lcp_po_size = lcp_size;
     }
@@ -495,15 +609,21 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
     caps_mask.rlp_wake_getsec = 1;
     caps_mask.rlp_wake_monitor = 1;
     caps_mask.pcr_map_da = 1;
+    caps_mask.tcg_event_log_format = 1;
+    caps_mask.tcg_event_log_format = 1;
     os_sinit_data->capabilities._raw = MLE_HDR_CAPS & ~caps_mask._raw;
     if ( sinit_caps.rlp_wake_monitor )
         os_sinit_data->capabilities.rlp_wake_monitor = 1;
     else if ( sinit_caps.rlp_wake_getsec )
         os_sinit_data->capabilities.rlp_wake_getsec = 1;
     else {     /* should have been detected in verify_acmod() */
-        printk(TBOOT_ERR"SINIT capabilities are incompatible (0x%x)\n", 
-               sinit_caps._raw);
+        printk(TBOOT_ERR"SINIT capabilities are incompatible (0x%x)\n", sinit_caps._raw);
         return NULL;
+    }
+    if ( get_evtlog_type() == EVTLOG_TPM2_TCG ) {
+        printk(TBOOT_INFO"SINIT ACM supports TCG compliant TPM 2.0 event log format, tcg_event_log_format = %d \n", 
+              sinit_caps.tcg_event_log_format);
+        os_sinit_data->capabilities.tcg_event_log_format = 1;
     }
     /* capabilities : require MLE pagetable in ECX on launch */
     /* TODO: when SINIT ready
@@ -520,7 +640,7 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
                 os_sinit_data->efi_rsdt_ptr = (uint64_t) rsdp->rsdp1.rsdt;
             } else {
                 /* rsdp */
-                memcpy((void *)&g_rsdp, rsdp, sizeof(struct acpi_rsdp));
+                tb_memcpy((void *)&g_rsdp, rsdp, sizeof(struct acpi_rsdp));
                 os_sinit_data->efi_rsdt_ptr = (uint64_t)((uint32_t)&g_rsdp);
             }
         } else {
@@ -550,8 +670,8 @@ static txt_heap_t *init_txt_heap(void *ptab_base, acm_hdr_t *sinit, loader_ctx *
 
     /* PCR mapping selection MUST be zero in TPM2.0 mode
      * since D/A mapping is the only supported by TPM2.0 */
-    if ( g_tpm->major >= TPM20_VER_MAJOR ) {
-        os_sinit_data->flags = (g_tpm->extpol == TB_EXTPOL_AGILE) ? 0 : 1;
+    if ( tpm->major >= TPM20_VER_MAJOR ) {
+        os_sinit_data->flags = (tpm->extpol == TB_EXTPOL_AGILE) ? 0 : 1;
         os_sinit_data->capabilities.pcr_map_no_legacy = 0;
         os_sinit_data->capabilities.pcr_map_da = 0;
         g_using_da = 1;
@@ -611,8 +731,7 @@ static void txt_wakeup_cpus(void)
     /* choose wakeup mechanism based on capabilities used */
     if ( os_sinit_data->capabilities.rlp_wake_monitor ) {
         printk(TBOOT_INFO"joining RLPs to MLE with MONITOR wakeup\n");
-        printk(TBOOT_DETA"rlp_wakeup_addr = 0x%x\n", 
-               sinit_mle_data->rlp_wakeup_addr);
+        printk(TBOOT_DETA"rlp_wakeup_addr = 0x%x\n", sinit_mle_data->rlp_wakeup_addr);
         *((uint32_t *)(unsigned long)(sinit_mle_data->rlp_wakeup_addr)) = 0x01;
     }
     else {
@@ -741,18 +860,21 @@ bool txt_s3_launch_environment(void)
     /* initial launch's TXT heap data is still in place and assumed valid */
     /* so don't re-create; this is OK because it was untrusted initially */
     /* and would be untrusted now */
-
-    /* initialize event log in os_sinit_data, so that events will not */
-    /* repeat when s3 */
-    if ( g_tpm->major == TPM12_VER_MAJOR && g_elog )
-        g_elog = (event_log_container_t *)init_event_log();
-    else if ( g_tpm->major == TPM20_VER_MAJOR && g_elog_2 )
-        init_evtlog_desc(g_elog_2);
-
+    int log_type = get_evtlog_type();
     /* get sinit binary loaded */
     g_sinit = (acm_hdr_t *)(uint32_t)read_pub_config_reg(TXTCR_SINIT_BASE);
-    if ( g_sinit == NULL )
+    if ( g_sinit == NULL ){
         return false;
+    }
+	/* initialize event log in os_sinit_data, so that events will not */
+	/* repeat when s3 */
+	if ( log_type == EVTLOG_TPM12 && g_elog ) {
+		g_elog = (event_log_container_t *)init_event_log();
+    } else if ( log_type == EVTLOG_TPM2_TCG && g_elog_2_1)  {
+        init_evtlog_desc_1(g_elog_2_1);
+    } else if ( log_type == EVTLOG_TPM2_LEGACY && g_elog_2)  {
+        init_evtlog_desc(g_elog_2);
+    }
 
     /* set MTRRs properly for AC module (SINIT) */
     set_mtrrs_for_acmod(g_sinit);
@@ -774,6 +896,8 @@ tb_error_t txt_launch_racm(loader_ctx *lctx)
      * find correct revocation AC module in modules list
      */
     find_platform_racm(lctx, (void **)&racm, NULL);
+    if ( racm == NULL )
+        return TB_ERR_SINIT_NOT_PRESENT;
     /* copy it to a 32KB aligned memory address */
     racm = copy_racm(racm);
     if ( racm == NULL )
@@ -1018,8 +1142,7 @@ void txt_cpu_wakeup(void)
     }
     msr_apicbase = rdmsr(MSR_APICBASE);
     if ( madt_apicbase != (msr_apicbase & ~0xFFFULL) ) {
-        printk(TBOOT_INFO"cpu %u restore apic base to %llx\n",
-               cpuid, madt_apicbase);
+        printk(TBOOT_INFO"cpu %u restore apic base to %llx\n", cpuid, madt_apicbase);
         wrmsr(MSR_APICBASE, (msr_apicbase & 0xFFFULL) | madt_apicbase);
     }
 
@@ -1178,7 +1301,7 @@ bool get_parameters(getsec_parameters_t *params)
         return false;
     }
 
-    memset(params, 0, sizeof(*params));
+    tb_memset(params, 0, sizeof(*params));
     params->acm_max_size = DEF_ACM_MAX_SIZE;
     params->acm_mem_types = DEF_ACM_MEM_TYPES;
     params->senter_controls = DEF_SENTER_CTRLS;

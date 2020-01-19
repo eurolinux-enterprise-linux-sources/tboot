@@ -40,6 +40,7 @@
 #include <string.h>
 #include <zlib.h>
 #include <openssl/evp.h>
+#include <safe_lib.h>
 #define PRINT   printf
 #include "../include/config.h"
 #include "../include/hash.h"
@@ -55,7 +56,6 @@ static bool hash_file(const char *filename, bool unzip, tb_hash_t *hash)
 {
     FILE *f;
     static char buf[1024];
-    EVP_MD_CTX ctx;
     const EVP_MD *md;
     int read_cnt;
 
@@ -69,8 +69,9 @@ static bool hash_file(const char *filename, bool unzip, tb_hash_t *hash)
         return false;
     }
 
+    EVP_MD_CTX *ctx = EVP_MD_CTX_create();
     md = EVP_sha1();
-    EVP_DigestInit(&ctx, md);
+    EVP_DigestInit(ctx, md);
     do {
         if ( unzip )
             read_cnt = gzread((gzFile)f, buf, sizeof(buf));
@@ -79,15 +80,16 @@ static bool hash_file(const char *filename, bool unzip, tb_hash_t *hash)
         if ( read_cnt == 0 )
             break;
 
-        EVP_DigestUpdate(&ctx, buf, read_cnt);
+        EVP_DigestUpdate(ctx, buf, read_cnt);
     } while ( true );
-    EVP_DigestFinal(&ctx, hash->sha1, NULL);
+    EVP_DigestFinal(ctx, hash->sha1, NULL);
 
     if ( unzip )
         gzclose((gzFile)f);
     else
         fclose(f);
-
+    
+    EVP_MD_CTX_destroy(ctx);
     return true;
 }
 
@@ -165,17 +167,17 @@ bool do_add(const param_data_t *params)
 
     /* hash command line and files */
     if ( params->hash_type == TB_HTYPE_IMAGE ) {
-        EVP_MD_CTX ctx;
+        EVP_MD_CTX *ctx = EVP_MD_CTX_create();
         const EVP_MD *md;
         tb_hash_t final_hash, hash;
 
         /* hash command line */
         info_msg("hashing command line \"%s\"...\n", params->cmdline);
         md = EVP_sha1();
-        EVP_DigestInit(&ctx, md);
-        EVP_DigestUpdate(&ctx, (unsigned char *)params->cmdline,
-                         strlen(params->cmdline));
-        EVP_DigestFinal(&ctx, (unsigned char *)&final_hash, NULL);
+        EVP_DigestInit(ctx, md);
+        EVP_DigestUpdate(ctx, (unsigned char *)params->cmdline,
+                         strnlen_s(params->cmdline, sizeof(params->cmdline)));
+        EVP_DigestFinal(ctx, (unsigned char *)&final_hash, NULL);
         if ( verbose ) {
             info_msg("hash is...");
             print_hash(&final_hash, TB_HALG_SHA1);
@@ -183,15 +185,19 @@ bool do_add(const param_data_t *params)
 
         /* hash file */
         info_msg("hashing image file %s...\n", params->image_file);
-        if ( !hash_file(params->image_file, true, &hash) )
+	if ( !hash_file(params->image_file, true, &hash) ) {
+            EVP_MD_CTX_destroy(ctx);
             return false;
+	}
         if ( verbose ) {
             info_msg("hash is...");
             print_hash(&hash, TB_HALG_SHA1);
         }
 
-        if ( !extend_hash(&final_hash, &hash, TB_HALG_SHA1) )
+        if ( !extend_hash(&final_hash, &hash, TB_HALG_SHA1) ){
+            EVP_MD_CTX_destroy(ctx);
             return false;
+	}
 
         if ( verbose ) {
             info_msg("cummulative hash is...");
@@ -200,6 +206,7 @@ bool do_add(const param_data_t *params)
 
         if ( !add_hash(pol_entry, &final_hash) ) {
             error_msg("cannot add another hash\n");
+            EVP_MD_CTX_destroy(ctx);
             return false;
         }
     }
@@ -294,7 +301,7 @@ bool do_unwrap(const param_data_t *params)
     lcp_custom_element_t *custom = (lcp_custom_element_t *)&elt->data;
     tb_policy_t *pol = (tb_policy_t *)&custom->data;
 
-    memcpy(g_policy, pol, calc_policy_size(pol));
+    memcpy_s(g_policy, MAX_TB_POLICY_SIZE, pol, calc_policy_size(pol));
 
     info_msg("writing/overwriting policy file...\n");
     if ( !write_policy_file(params->policy_file) )

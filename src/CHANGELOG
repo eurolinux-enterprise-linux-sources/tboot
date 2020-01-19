@@ -1,3 +1,51 @@
+20181130: v1.9.9
+        tools: fix some dereference-NULL issues reported by klocwork
+        tools: replace banned mem/str fns with corresponding ones in safestringlib
+        Add safestringlib code to support replacement of banned mem/str fns
+        lcptools: remove tools supporting platforms before 2008
+        tboot: update string/memory fn name to differentiate from c lib
+        Fix a harmless overflow caused by wrong loop limits
+20181011: v1.9.8
+        Skip tboot launch error index read/write when ignore prev err option is true
+        s3-fix: fix a stack overflow caused by enlarged tb_hash_t union
+        S3 fix: revert the mis-changed type casting in changeset 522:8e881a07c059
+        S3-fix: Adding option save_vtd=true to opt-in the vtd table restore
+20180830: v1.9.7
+        Fix a lot of issues in tools reported by klocwork scan.
+        Fix a lot of issues in tboot module reported by klocwork scan.
+        Remove a redundant tboot option
+        Fix indent in heap.c
+        Fix 4 issues along with extpol=agile option
+        Mitigations for tpm interposer attacks
+        Add an option in tboot to force SINIT to use the legacy TPM2 log format.
+        Add support for appending to a TPM2 TCG style event log.
+        Ensure tboot log is available even when measured launch is skipped.
+        Add centos7 instructions for Use in EFI boot mode.
+        Fix memory leak and invalid reads and writes issues.
+        Fix TPM 1.2 locality selection issue.
+        Fix a null pointer dereference bug when Intel TXT is disabled.
+        Optimize tboot docs installation.
+        Fix security vulnerabilities rooted in tpm_if structure and g_tpm variable.
+        The size field of the MB2 tag is the size of the tag header + the size
+        Fix openssl-1.0.2 double frees
+        Make policy element stm_elt use unique type name
+        lcptools-v2 utilities fixes
+        port to openssl-1.1.0
+        Reset debug PCR16 to zero.
+        Fix a logical error in function bool evtlog_append(...).
+20170711: v1.9.6
+        GCC7 fix, adds generic FALLTHROUGH notations to avoid warnings appearing on GCC7
+        Ensure Tboot never overwrites modules in the process of moving them.
+        Add support to x2APIC, which uses 32 bit APIC ID.
+        Fix S3 secrets sealing/unsealing failures
+        Support OpenSSL 1.1.0+ for ECDSA signature verification.
+        Support OpenSSL 1.1.0+ for RSA key manipulation.
+        Adds additional checks to prevent the kernel image from being overwritten.
+        Added TCG TPM event log support.
+        Pass through the EFI memory map that's provided by grub2.
+        Fix a null pointer dereference bug when Intel TXT is disabled in BIOS.
+        Adjust KERNEL_CMDLINE_OFFSET from 0x9000 to 0x8D00.
+        Bounds checking on the kernel_cmdline string.
 20161216: v1.9.5
         Add 2nd generation of LCP creation tool source codes for TPM 2.0 platforms.
         Add user guide for 2nd generation LCP creation tool

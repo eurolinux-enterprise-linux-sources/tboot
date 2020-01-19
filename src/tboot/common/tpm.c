@@ -45,13 +45,16 @@
 #include <tpm.h>
 #include <sha1.h>
 
-__data struct tpm_if *g_tpm = NULL;
+__data uint8_t g_tpm_ver = TPM_VER_UNKNOWN;
+__data struct tpm_if g_tpm = {
+    .cur_loc = 0,
+    .timeout.timeout_a = TIMEOUT_A,
+    .timeout.timeout_b = TIMEOUT_B,
+    .timeout.timeout_c = TIMEOUT_C,
+    .timeout.timeout_d = TIMEOUT_D,
+};
+
 u16 tboot_alg_list[] = {TB_HALG_SHA1, TB_HALG_SHA256};
-
-
-
-
-
 
 /* Global variables for TPM status register */
 static tpm20_reg_sts_t       g_reg_sts, *g_reg_sts_20 = &g_reg_sts;
@@ -70,15 +73,15 @@ typedef union {
 } tpm_reg_data_crb_t;
 
 #define TPM_ACTIVE_LOCALITY_TIME_OUT    \
-          (TIMEOUT_UNIT * g_tpm->timeout.timeout_a)  /* according to spec */
+          (TIMEOUT_UNIT *get_tpm()->timeout.timeout_a)  /* according to spec */
 #define TPM_CMD_READY_TIME_OUT          \
-          (TIMEOUT_UNIT * g_tpm->timeout.timeout_b)  /* according to spec */
+          (TIMEOUT_UNIT *get_tpm()->timeout.timeout_b)  /* according to spec */
 #define TPM_CMD_WRITE_TIME_OUT          \
-          (TIMEOUT_UNIT * g_tpm->timeout.timeout_d)  /* let it long enough */
+          (TIMEOUT_UNIT *get_tpm()->timeout.timeout_d)  /* let it long enough */
 #define TPM_DATA_AVAIL_TIME_OUT         \
-          (TIMEOUT_UNIT * g_tpm->timeout.timeout_c)  /* let it long enough */
+          (TIMEOUT_UNIT *get_tpm()->timeout.timeout_c)  /* let it long enough */
 #define TPM_RSP_READ_TIME_OUT           \
-          (TIMEOUT_UNIT * g_tpm->timeout.timeout_d)  /* let it long enough */
+          (TIMEOUT_UNIT *get_tpm()->timeout.timeout_d)  /* let it long enough */
 #define TPM_VALIDATE_LOCALITY_TIME_OUT  0x100
 
 #define read_tpm_sts_reg(locality) { \
@@ -98,7 +101,7 @@ else \
 static void tpm_send_cmd_ready_status(uint32_t locality)
 {
     /* write 1 to TPM_STS_x.commandReady to let TPM enter ready state */
-    memset((void *)&g_reg_sts, 0, sizeof(g_reg_sts));
+    tb_memset((void *)&g_reg_sts, 0, sizeof(g_reg_sts));
     g_reg_sts.command_ready = 1;
     write_tpm_sts_reg(locality);
 }
@@ -116,15 +119,15 @@ static bool tpm_send_cmd_ready_status_crb(uint32_t locality)
       printk(TBOOT_INFO"1. reg_ctrl_sts.tpmsts: 0x%x\n", reg_ctrl_sts.tpmsts); 	
 #endif
 
-	if ( reg_ctrl_sts.tpmidle== 1) {
-           reg_ctrl_request._raw[0] = 0;
+	if ( reg_ctrl_sts.tpmidle == 1) {
+           tb_memset(&reg_ctrl_request,0,sizeof(reg_ctrl_request));
            reg_ctrl_request.cmdReady = 1;
 	    write_tpm_reg(locality, TPM_CRB_CTRL_REQ, &reg_ctrl_request);
 
 	    return true;
 	}
 
-      reg_ctrl_request._raw[0] = 0;
+      tb_memset(&reg_ctrl_request,0,sizeof(reg_ctrl_request));
       reg_ctrl_request.goIdle = 1;
       write_tpm_reg(locality, TPM_CRB_CTRL_REQ, &reg_ctrl_request);
 	  
@@ -158,7 +161,7 @@ static bool tpm_send_cmd_ready_status_crb(uint32_t locality)
        printk(TBOOT_INFO"2. reg_ctrl_sts.tpmsts: 0x%x\n", reg_ctrl_sts.tpmsts); 	
 #endif
 
-       reg_ctrl_request._raw[0] = 0;
+       tb_memset(&reg_ctrl_request,0,sizeof(reg_ctrl_request));
        reg_ctrl_request.cmdReady = 1;
 	write_tpm_reg(locality, TPM_CRB_CTRL_REQ, &reg_ctrl_request);
 
@@ -249,7 +252,7 @@ static bool tpm_check_da_status(uint32_t locality)
 
 static void tpm_execute_cmd(uint32_t locality)
 {
-    memset((void *)&g_reg_sts, 0, sizeof(g_reg_sts));
+    tb_memset((void *)&g_reg_sts, 0, sizeof(g_reg_sts));
     g_reg_sts.tpm_go = 1;
     write_tpm_sts_reg(locality);
 }
@@ -724,7 +727,7 @@ bool tpm_relinquish_locality_crb(uint32_t locality)
     if ( reg_loc_state.loc_assigned == 0 )    return true;
 
     /* make inactive by writing a 1 */
-    reg_loc_ctrl._raw[0] = 0;
+    tb_memset(&reg_loc_ctrl,0,sizeof(reg_loc_ctrl));
     reg_loc_ctrl.relinquish = 1;
     write_tpm_reg(locality, TPM_REG_LOC_CTRL, &reg_loc_ctrl);
 
@@ -778,7 +781,7 @@ bool tpm_request_locality_crb(uint32_t locality){
     tpm_reg_loc_state_t  reg_loc_state;
     tpm_reg_loc_ctrl_t    reg_loc_ctrl;
     /* request access to the TPM from locality N */
-    reg_loc_ctrl._raw[0] = 0;
+    tb_memset(&reg_loc_ctrl,0,sizeof(reg_loc_ctrl));
     reg_loc_ctrl.requestAccess = 1;
     write_tpm_reg(locality, TPM_REG_LOC_CTRL, &reg_loc_ctrl);
 
@@ -828,6 +831,8 @@ bool tpm_workaround_crb(void)
 
 bool tpm_detect(void)
 {
+    struct tpm_if *tpm = get_tpm(); /* Don't leave tpm as NULL */
+    const struct tpm_if_fp *tpm_fp;
     if (is_tpm_crb()) {
          printk(TBOOT_INFO"TPM: This is Intel PTT, TPM Family 0x%d\n", g_tpm_family);
          if (!txt_is_launched()) {
@@ -854,14 +859,16 @@ bool tpm_detect(void)
     	  }
     }
     else {
-		g_tpm = &tpm_12_if; /* Don't leave g_tpm as NULL*/
+		g_tpm_ver = TPM_VER_12; 
+		tpm_fp = get_tpm_fp(); /* Don't leave tpm_fp as NULL */
+
 		if ( tpm_validate_locality(0) )  printk(TBOOT_INFO"TPM: FIFO_INF Locality 0 is open\n");
 		else {	
 			printk(TBOOT_ERR"TPM: FIFO_INF Locality 0 is not open\n");
 			return false;
 			}
 		/* determine TPM family from command check */
-		if ( g_tpm->check() )  {
+		if ( tpm_fp->check() )  {
 			g_tpm_family = TPM_IF_12;
 			printk(TBOOT_INFO"TPM: discrete TPM1.2 Family 0x%d\n", g_tpm_family);	
 			}
@@ -871,21 +878,12 @@ bool tpm_detect(void)
 			}
 	}
    
-    if (g_tpm_family == TPM_IF_12)  g_tpm = &tpm_12_if;
-    if (g_tpm_family == TPM_IF_20_FIFO)  g_tpm = &tpm_20_if;
-    if (g_tpm_family == TPM_IF_20_CRB)  g_tpm = &tpm_20_if;
+    if (g_tpm_family == TPM_IF_12)  g_tpm_ver = TPM_VER_12;
+    if (g_tpm_family == TPM_IF_20_FIFO)  g_tpm_ver = TPM_VER_20;
+    if (g_tpm_family == TPM_IF_20_CRB)  g_tpm_ver = TPM_VER_20;
 
-   /*  if (!txt_is_launched()) 
-	   g_tpm->cur_loc = 0;
-     else 
-	   g_tpm->cur_loc = 2;
-	 	
-    g_tpm->timeout.timeout_a = TIMEOUT_A;
-    g_tpm->timeout.timeout_b = TIMEOUT_B;
-    g_tpm->timeout.timeout_c = TIMEOUT_C;
-    g_tpm->timeout.timeout_d = TIMEOUT_D;
-*/
-    return g_tpm->init(g_tpm);
+    tpm_fp = get_tpm_fp();
+    return tpm_fp->init(tpm);
 }
 
 void tpm_print(struct tpm_if *ti)
@@ -897,8 +895,23 @@ void tpm_print(struct tpm_if *ti)
     printk(TBOOT_INFO"\t extend policy: %d\n", ti->extpol);
     printk(TBOOT_INFO"\t current alg id: 0x%x\n", ti->cur_alg);
     printk(TBOOT_INFO"\t timeout values: A: %u, B: %u, C: %u, D: %u\n", ti->timeout.timeout_a, ti->timeout.timeout_b, ti->timeout.timeout_c, ti->timeout.timeout_d);
+} 
+
+struct tpm_if *get_tpm(void)
+{
+    return &g_tpm;
 }
 
+const struct tpm_if_fp *get_tpm_fp(void)
+{
+    if ( g_tpm_ver == TPM_VER_12 )
+        return &tpm_12_if_fp;
+    else if ( g_tpm_ver == TPM_VER_20)
+        return &tpm_20_if_fp;
+
+    return NULL;
+
+}
 /*
  * Local variables:
  * mode: C

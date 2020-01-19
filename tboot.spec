@@ -1,6 +1,6 @@
 Summary:        Performs a verified launch using Intel TXT
 Name:           tboot
-Version:        1.9.5
+Version:        1.9.9
 Release:        1%{?dist}
 Epoch:          1
 
@@ -47,22 +47,16 @@ rm -rf $RPM_BUILD_ROOT
 
 %files
 %defattr(-,root,root,-)
-%doc README COPYING docs/* lcptools/lcptools2.txt lcptools/Linux_LCP_Tools_User_Manual.pdf
+%doc README COPYING docs/* lcptools-v2/lcptools.txt lcptools/Linux_LCP_Tools_User_Manual.pdf
 %config %{_sysconfdir}/grub.d/20_linux_tboot
 %config %{_sysconfdir}/grub.d/20_linux_xen_tboot
 %{_sbindir}/acminfo
-%{_sbindir}/lcp_crtpconf
-%{_sbindir}/lcp_crtpol
-%{_sbindir}/lcp_crtpol2
-%{_sbindir}/lcp_crtpolelt
-%{_sbindir}/lcp_crtpollist
-%{_sbindir}/lcp_mlehash
-%{_sbindir}/lcp_readpol
-%{_sbindir}/lcp_writepol
 %{_sbindir}/lcp2_crtpol
 %{_sbindir}/lcp2_crtpolelt
 %{_sbindir}/lcp2_crtpollist
 %{_sbindir}/lcp2_mlehash
+%{_sbindir}/lcp_readpol
+%{_sbindir}/lcp_writepol
 %{_sbindir}/parse_err
 %{_sbindir}/tb_polgen
 %{_sbindir}/tpmnv_defindex
@@ -85,6 +79,23 @@ rm -rf $RPM_BUILD_ROOT
 /boot/tboot-syms
 
 %changelog
+* Mon Mar 18 2019 Tony Camuso <tcamuso@redhat.com> - 1:1.9.9-1
+  Update to latest tboot.
+  Resolves rhbz#1641138
+
+* Mon Jul 16 2018 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-3
+  Apply patches from upstream since realease of 1.9.6
+  Resolves: rhbz#1515081
+  Resolves: rhbz#1511798
+
+* Thu Jan 25 2018 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-2
+  [PATCH] MANPATH should not be used as install dir
+  Resolves: rhbz#1450968
+
+* Mon Sep 11 2017 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-1
+  Rebase to 1.96
+  Resolves: rhbz#1457529
+
 * Fri Jan 27 2017 Tony Camuso <tcamuso@redhat.com> - 1:1.9.5-1
   Rebase to 1.9.5
   Resolves: rhbz#1384210
