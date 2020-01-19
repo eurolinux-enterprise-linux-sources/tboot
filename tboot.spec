@@ -1,7 +1,7 @@
 Summary:        Performs a verified launch using Intel TXT
 Name:           tboot
 Version:        1.9.6
-Release:        2%{?dist}
+Release:        3%{?dist}
 Epoch:          1
 
 Group:          System Environment/Base
@@ -10,7 +10,22 @@ URL:            http://sourceforge.net/projects/tboot/
 Source0:        http://downloads.sourceforge.net/%{name}/%{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
-Patch01:	0001-MANPATH-should-not-be-used-as-install-dir.patch
+Patch01: ../patches/0001-Fix-a-logical-error-in-function-bool-evtlog_append.patch
+Patch02: ../patches/0002-Reset-debug-PCR16-to-zero.patch
+Patch03: ../patches/0003-port-to-openssl-1.1.0.patch
+Patch04: ../patches/0004-lcptools-v2-utilities-fixes.patch
+Patch05: ../patches/0005-Make-policy-element-stm_elt-use-unique-type-name.patch
+Patch06: ../patches/0006-Fix-openssl-1.0.2-double-frees.patch
+Patch07: ../patches/0007-The-size-field-of-the-MB2-tag-is-the-size-of-the-tag.patch
+Patch08: ../patches/0008-Fix-security-vulnerabilities-rooted-in-tpm_if-struct.patch
+Patch09: ../patches/0009-Optimize-tboot-docs-installation.patch
+Patch10: ../patches/0010-Fix-a-null-pointer-dereference-bug-when-Intel-TXT-is.patch
+Patch11: ../patches/0011-Fix-TPM-1.2-locality-selection-issue.patch
+Patch12: ../patches/0012-Fix-memory-leak-and-invalid-reads-and-writes-issues.patch
+Patch13: ../patches/0013-Add-centos7-instructions-for-Use-in-EFI-boot-mode.patch
+Patch14: ../patches/0014-Ensure-tboot-log-is-available-even-when-measured-lau.patch
+Patch15: ../patches/0015-Add-support-for-appending-to-a-TPM2-TCG-style-event-.patch
+Patch16: ../patches/0016-Add-an-option-in-tboot-to-force-SINIT-to-use-the-leg.patch
 
 BuildRequires:  trousers-devel
 BuildRequires:  openssl-devel
@@ -23,7 +38,23 @@ and verified launch of an OS kernel/VMM.
 
 %prep
 %setup -q
+
 %patch01 -p1 -b .0001
+%patch02 -p1 -b .0002
+%patch03 -p1 -b .0003
+%patch04 -p1 -b .0004
+%patch05 -p1 -b .0005
+%patch06 -p1 -b .0006
+%patch07 -p1 -b .0007
+%patch08 -p1 -b .0008
+%patch09 -p1 -b .0009
+%patch10 -p1 -b .0010
+%patch11 -p1 -b .0011
+%patch12 -p1 -b .0012
+%patch13 -p1 -b .0013
+%patch14 -p1 -b .0014
+%patch15 -p1 -b .0015
+%patch16 -p1 -b .0016
 
 %build
 CFLAGS="$RPM_OPT_FLAGS"; export CFLAGS
@@ -88,6 +119,11 @@ rm -rf $RPM_BUILD_ROOT
 /boot/tboot-syms
 
 %changelog
+* Mon Jul 16 2018 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-3
+  Apply patches from upstream since realease of 1.9.6
+  Resolves: rhbz#1515081
+  Resolves: rhbz#1511798
+
 * Thu Jan 25 2018 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-2
   [PATCH] MANPATH should not be used as install dir
   Resolves: rhbz#1450968
