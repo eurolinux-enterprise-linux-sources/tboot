@@ -81,7 +81,10 @@ void print_tb_error_msg(tb_error_t error)
         case TB_ERR_VMX_NOT_SUPPORTED:
             printk(TBOOT_ERR"VMX not supported.\n");
             break;
-        case TB_ERR_TXT_NOT_SUPPORTED:
+        case TB_ERR_VTD_NOT_SUPPORTED:
+	    printk(TBOOT_ERR"DMAR table not found. Check if Vt-D is enabled in BIOS.\n");
+	    break;
+	case TB_ERR_TXT_NOT_SUPPORTED:
             printk(TBOOT_ERR"TXT not supported.\n");
             break;
         case TB_ERR_MODULES_NOT_IN_POLICY:
@@ -113,6 +116,9 @@ void print_tb_error_msg(tb_error_t error)
             break;
         case TB_ERR_NV_VERIFICATION_FAILED:
             printk(TBOOT_ERR"verifying nv against policy failed.\n");
+            break;
+        case TB_ERR_PREV_TXT_ERROR:
+            printk(TBOOT_ERR"previous measured launch had errors, skipping measured launch...\n");
             break;
         default:
             printk(TBOOT_ERR"unknown error (%d).\n", error);
@@ -181,7 +187,7 @@ bool was_last_boot_error(void)
 
     /* check TB_LAUNCH_ERR_IDX */
     if ( read_tb_error_code(&error) ) {
-        if ( error != TB_ERR_FIXED )
+        if ( error != TB_ERR_FIXED && error != TB_ERR_NONE )
             return true;
     }
 

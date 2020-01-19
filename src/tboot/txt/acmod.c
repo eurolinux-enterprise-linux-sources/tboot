@@ -289,6 +289,7 @@ void print_txt_caps(const char *prefix, txt_caps_t caps)
     printk(TBOOT_DETA"%s    pcr_map_da: %d\n", prefix, caps.pcr_map_da);
     printk(TBOOT_DETA"%s    platform_type: %d\n", prefix, caps.platform_type);
     printk(TBOOT_DETA"%s    max_phy_addr: %d\n", prefix, caps.max_phy_addr);
+    printk(TBOOT_DETA"%s    tcg_event_log_format: %d\n", prefix, caps.tcg_event_log_format);
 }
 
 static void print_acm_hdr(const acm_hdr_t *hdr, const char *mod_name)
@@ -650,6 +651,8 @@ bool does_acmod_match_platform(const acm_hdr_t* hdr)
 #ifndef IS_INCLUDED
 acm_hdr_t *get_bios_sinit(const void *sinit_region_base)
 {
+    if ( sinit_region_base == NULL )
+       return NULL;
     txt_heap_t *txt_heap = get_txt_heap();
     bios_data_t *bios_data = get_bios_data_start(txt_heap);
 
@@ -736,6 +739,9 @@ acm_hdr_t *copy_sinit(const acm_hdr_t *sinit)
                "SINIT (%x)\n", sinit_region_size, sinit->size*4);
         return NULL;
     }
+
+    if ( sinit_region_base == NULL )
+       return NULL;
 
     /* copy it there */
     memcpy(sinit_region_base, sinit, sinit->size*4);
@@ -905,9 +911,6 @@ bool verify_acmod(const acm_hdr_t *acm_hdr)
 
     /* print it for debugging */
     print_acm_hdr(acm_hdr, "SINIT");
-
-    /* verify SE enablement status */
-    verify_IA32_se_svn_status(acm_hdr);
 
     /* entry point is offset from base addr so make sure it is within module */
     if ( acm_hdr->entry_point >= size ) {

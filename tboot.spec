@@ -1,7 +1,7 @@
 Summary:        Performs a verified launch using Intel TXT
 Name:           tboot
-Version:        1.9.5
-Release:        1%{?dist}
+Version:        1.9.6
+Release:        2%{?dist}
 Epoch:          1
 
 Group:          System Environment/Base
@@ -9,6 +9,8 @@ License:        BSD
 URL:            http://sourceforge.net/projects/tboot/
 Source0:        http://downloads.sourceforge.net/%{name}/%{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+
+Patch01:	0001-MANPATH-should-not-be-used-as-install-dir.patch
 
 BuildRequires:  trousers-devel
 BuildRequires:  openssl-devel
@@ -21,6 +23,7 @@ and verified launch of an OS kernel/VMM.
 
 %prep
 %setup -q
+%patch01 -p1 -b .0001
 
 %build
 CFLAGS="$RPM_OPT_FLAGS"; export CFLAGS
@@ -85,6 +88,14 @@ rm -rf $RPM_BUILD_ROOT
 /boot/tboot-syms
 
 %changelog
+* Thu Jan 25 2018 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-2
+  [PATCH] MANPATH should not be used as install dir
+  Resolves: rhbz#1450968
+
+* Mon Sep 11 2017 Tony Camuso <tcamuso@redhat.com> - 1:1.9.6-1
+  Rebase to 1.96
+  Resolves: rhbz#1457529
+
 * Fri Jan 27 2017 Tony Camuso <tcamuso@redhat.com> - 1:1.9.5-1
   Rebase to 1.9.5
   Resolves: rhbz#1384210

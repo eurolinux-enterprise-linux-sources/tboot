@@ -160,14 +160,19 @@ static lcp_signature_t2 *read_rsa_pubkey_file(const char *file)
 
     memset(sig, 0, sizeof(lcp_rsa_signature_t) + 2*keysize);
     sig->rsa_signature.pubkey_size = keysize;
-    if ( (unsigned int)BN_num_bytes(pubkey->n) != keysize ) {
-        ERROR("Error: modulus size not match key size\n");
-        free(sig);
-        RSA_free(pubkey);
-        return NULL;
-    }
+   
+    BIGNUM *modulus = BN_new();
+    
+    /* OpenSSL Version 1.1.0 and later don't allow direct access to RSA 
+       stuct */    
+    #if OPENSSL_VERSION_NUMBER >= 0x10100000L
+        RSA_get0_key(pubkey, (const BIGNUM **)&modulus, NULL, NULL); 
+    #else
+        modulus = pubkey->n;
+    #endif
+
     unsigned char key[keysize];
-    BN_bn2bin(pubkey->n, key);
+    BN_bn2bin(modulus, key);
     /* openssl key is big-endian and policy requires little-endian, so reverse
        bytes */
     for ( unsigned int i = 0; i < keysize; i++ )
@@ -179,6 +184,7 @@ static lcp_signature_t2 *read_rsa_pubkey_file(const char *file)
     }
 
     LOG("read rsa pubkey succeed!\n");
+    BN_free(modulus);
     RSA_free(pubkey);
     return sig;
 }
@@ -383,9 +389,16 @@ static bool ecdsa_sign_tpm20_list_data(lcp_policy_list_t2 *pollist, EC_KEY *ecke
 
         BIGNUM *r = BN_new();
         BIGNUM *s = BN_new();
-        r = ecdsasig->r;
-        s = ecdsasig->s;
-        unsigned int BN_r_size = BN_num_bytes(r);
+        
+	/* OpenSSL Version 1.1.0 and later don't allow direct access to 
+	   ECDSA_SIG stuct */ 
+        #if OPENSSL_VERSION_NUMBER >= 0x10100000L
+      	    ECDSA_SIG_get0(ecdsasig, (const BIGNUM **)&r, (const BIGNUM **)&s);
+        #else
+    	    r = ecdsasig->r;
+    	    s = ecdsasig->s;
+        #endif
+	unsigned int BN_r_size = BN_num_bytes(r);
         unsigned int BN_s_size = BN_num_bytes(s); 
         unsigned char key_r[BN_r_size];
         unsigned char key_s[BN_s_size];
@@ -403,6 +416,8 @@ static bool ecdsa_sign_tpm20_list_data(lcp_policy_list_t2 *pollist, EC_KEY *ecke
             display_tpm20_signature("    ", sig, pollist->sig_alg, false);
         }
 
+	BN_free(r);
+	BN_free(s);
         return true;
     }
     return false;
